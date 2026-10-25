@@ -10,13 +10,13 @@ detects and drives around obstacles, and reports telemetry over MQTT.
 
 ## Team
 
-| Buddy | Member | Responsibility | 
-|---|---|---|---|
-| 1 | 2503687 | Communication: Wi-Fi, MQTT telemetry and commands | 
-| 2 | 2502437 | Motion: motors, wheel encoders, PID speed control | 
-| 3 | 2502515 | Line following and barcode decoding (IR sensors) | 
-| 4 | 2501723 | IMU (LSM303): tilt, heading, hump height | 
-| 5 | 2502046 | Obstacles: ultrasonic + servo scan, bypass | 
+| Buddy | Member | Responsibility |
+|---|---|---|
+| 1 | 2503687 | Communication: Wi-Fi, MQTT telemetry and commands |
+| 2 | 2502437 | Motion: motors, wheel encoders, PID speed control |
+| 3 | 2502515 | Line following and barcode decoding (IR sensors) |
+| 4 | 2501723 | IMU (LSM303): tilt, heading, hump height |
+| 5 | 2502046 | Obstacles: ultrasonic + servo scan, bypass |
 
 Shared code: `app_program/platform/` (kernel objects, timing, bit packing,
 settings) and `app_program/integration/` (vehicle state machine, barcode map).
