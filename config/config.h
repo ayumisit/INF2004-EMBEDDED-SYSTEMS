@@ -46,7 +46,7 @@
 #define CNF_MAX_FLGID		16	/* Event flag */
 #define CNF_MAX_MBXID		4	/* Mailbox*/
 #define CNF_MAX_MTXID		4	/* Mutex */
-#define CNF_MAX_MBFID		4	/* Message buffer */
+#define CNF_MAX_MBFID		8	/* Message buffer (AAI03 robot needs 6) */
 #define CNF_MAX_MPLID		4	/* Memory pool */
 #define CNF_MAX_MPFID		4	/* Fixed size memory pool */
 #define CNF_MAX_CYCID		4	/* Cyclic handler */
@@ -168,7 +168,10 @@
 /* Use Sample device driver.
  *  1: Valid  0: Invalid
  */
-#define USE_SDEV_DRV		(1)	/* Use Sample device driver */
+/* AAI03 robot: the sample I2C driver claims GP8/GP9, which are the Robo Pico
+ * motor pins, and the sample ADC driver claims GP26..GP28.  The robot drives
+ * these peripherals through the Pico SDK instead, so the samples stay off. */
+#define USE_SDEV_DRV		(0)	/* Use Sample device driver */
 
 /*---------------------------------------------------------------------- */
 /*

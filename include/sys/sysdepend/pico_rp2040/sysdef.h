@@ -75,13 +75,27 @@
  *	GP25	WL_CS	radio chip select
  *	GP29	WL_CLK	radio SPI clock (also ADC3 / VSYS sense)
  *
- * Also already committed on this board: GP0/GP1 are the UART0 console, and
+ * Also already committed on this board: GP0/GP1 are the UART0 console
+ * (unless BOARD_UART0_PINS is 0), and
  * GP26..GP28 are the sample ADC driver's inputs when USE_SDEV_DRV is enabled.
  *
  * BOARD_LED_PIN is the external LED used as the liveness indicator.  Change
  * it to any free GPIO that has an LED attached.
+ *
+ * AAI03 robot: GP16 is the left wheel encoder input, so the liveness pin moves
+ * to GP14, an unused Robo Pico servo header whose on-board GPIO status LED
+ * shows the state.  Verify nothing is plugged into GP14 before flashing.
  */
-#define	BOARD_LED_PIN		16
+#define	BOARD_LED_PIN		14
+
+/*
+ * BOARD_UART0_PINS selects whether startup routes UART0 to GP0/GP1.
+ *
+ * AAI03 robot: GP0/GP1 carry the LSM303DLHC I2C bus (I2C0 SDA/SCL), so the
+ * UART pins are left unrouted and the console runs over USB-CDC.  UART0 itself
+ * is still clocked, so the T-Monitor mirror keeps working internally.
+ */
+#define	BOARD_UART0_PINS	0
 
 /*
  * Startup checkpoint diagnostic.
