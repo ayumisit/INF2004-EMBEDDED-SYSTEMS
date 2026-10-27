@@ -68,6 +68,8 @@ extern uint64_t time_us_64(void);
  * structure from the other processor, so an unguarded copy can mix fields
  * from two different updates.  Odd means a publication is in progress. */
 static volatile uint32_t status_version;
+/* AAI03 robot: application network poll, run in this task's context. */
+static void (*volatile app_poll)(void);
 static volatile uint32_t status_read_retries;
 
 static T_CYW43_UTK_STATUS radio_status = {
@@ -426,6 +428,12 @@ static void update_dhcp_status(void)
 }
 #endif
 
+void cyw43_utk_set_app_poll(void (*poll)(void))
+{
+    mp_memory_barrir();
+    app_poll = poll;
+}
+
 void cyw43_utk_link_state_changed(int up)
 {
     radio_status.link_up = (up != 0);
@@ -546,6 +554,7 @@ void cyw43_utk_task(int32_t stacd, void *exinf)
         lwip_utk_ipv4_poll(&cyw43_state.netif[CYW43_ITF_STA]);
         update_ipv4_status();
 #endif
+        if(app_poll != NULL) app_poll();
         radio_status.poll_count++;
         radio_status.scan_active = cyw43_wifi_scan_active(&cyw43_state);
         if(was_scanning && !radio_status.scan_active) {
