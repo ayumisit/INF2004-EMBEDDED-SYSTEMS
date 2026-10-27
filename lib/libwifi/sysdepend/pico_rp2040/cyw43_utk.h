@@ -184,4 +184,9 @@ void cyw43_utk_get_status(T_CYW43_UTK_STATUS *status);
 void cyw43_utk_task(int32_t stacd, void *exinf);
 void cyw43_utk_link_state_changed(int up);
 
+/* AAI03 robot: register an application network poll.  The function runs in
+ * the radio-owner task on every poll, after cyw43_poll() and the lwIP timers,
+ * so it may call lwIP and cyw43 APIs.  Pass NULL to remove it. */
+void cyw43_utk_set_app_poll(void (*poll)(void));
+
 #endif
