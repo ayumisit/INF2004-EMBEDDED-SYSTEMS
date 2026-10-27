@@ -21,3 +21,9 @@ config/tcp_test_config.h
 # Python
 __pycache__/
 *.pyc
+
+# AAI03 build stamp and host test binaries
+build_make/mtkernel_3/app_program/.barr_check_ok
+tests/robot_tests
+tests/codec_vectors
+build_make/mtkernel_3/app_program/.buddy_test_*
