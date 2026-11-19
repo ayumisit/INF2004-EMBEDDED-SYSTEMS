@@ -19,6 +19,8 @@ import sys
 MAX_LINE = 80
 MAX_NAME = 31
 EOF_MARKER = '/*** end of file ***/'
+# Left over from the kernel demo; not built into the robot.
+NOT_ROBOT_FILES = {'demo_tasks.c', 'demo_tasks.h', 'usb_console_compat.h'}
 
 FORBIDDEN_KEYWORDS = {
     'auto': '1.7.a', 'register': '1.7.b', 'goto': '1.7.c',
@@ -601,7 +603,7 @@ def check_tree(roots):
         for dirpath, _dirs, files in os.walk(root_dir):
             for base in sorted(files):
                 root, ext = os.path.splitext(base)
-                if ext not in ('.c', '.h'):
+                if ext not in ('.c', '.h') or base in NOT_ROBOT_FILES:
                     continue
                 path = os.path.join(dirpath, base)
 

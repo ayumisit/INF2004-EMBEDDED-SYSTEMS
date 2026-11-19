@@ -35,8 +35,9 @@
 #define UM_PER_MM               1000
 #define MM_PER_CM               10
 #define EDGE_TIMEOUT_US         (ENC_EDGE_TIMEOUT_MS * US_PER_MS)
+#define SPEED_WINDOW            5u      // Periods the speed is averaged over.
 
-// Edge length, tunable live (TUNE_ENC_UM_PER_EDGE, 500..30000 um).
+// Edge length, tunable live (TUNE_ENC_UM_PER_EDGE, 50..30000 um).
 // NOTE: the signed distance product overflows after about 200 m of travel
 // per wheel, far beyond one 5-minute run.
 #define UM_PER_EDGE             (tune_get(TUNE_ENC_UM_PER_EDGE))
@@ -58,10 +59,16 @@ static wheel_isr_t volatile g_wheels[WHEEL_COUNT];
 // Published snapshot (enc_state), guarded by ROBOT_IPC_LOCK_ENC_STATE.
 static encoder_state_t      g_state;
 
+// Recent counts and their times, for the speed (encoder task only).
+static int32_t              g_hist_count[WHEEL_COUNT][SPEED_WINDOW];
+static uint32_t             g_hist_us[SPEED_WINDOW];
+static uint32_t             g_hist_next = 0u;
+
 static uint64_t             g_stack[STACK_SMALL / sizeof(uint64_t)];
 
 static void    encoder_task(INT start_code, void * p_ext_info);
-static int32_t wheel_speed(wheel_isr_t const * p_wheel, uint32_t now_us);
+static int32_t wheel_speed(uint32_t wheel, wheel_isr_t const * p_wheel,
+                           uint32_t now_us);
 static void    publish(encoder_state_t const * p_state);
 static void    encoder_edge_isr(uint32_t pin, uint32_t edges,
                                 uint32_t time_us, uint32_t levels);
@@ -187,8 +194,17 @@ encoder_task (INT start_code, void * p_ext_info)
 
         state.left_count        = copy[WHEEL_LEFT].count;
         state.right_count       = copy[WHEEL_RIGHT].count;
-        state.left_speed_mm_s   = wheel_speed(&copy[WHEEL_LEFT], now_us);
-        state.right_speed_mm_s  = wheel_speed(&copy[WHEEL_RIGHT], now_us);
+        state.left_speed_mm_s   = wheel_speed(WHEEL_LEFT, &copy[WHEEL_LEFT],
+                                              now_us);
+        state.right_speed_mm_s  = wheel_speed(WHEEL_RIGHT,
+                                              &copy[WHEEL_RIGHT], now_us);
+
+        // Remember this sample for the speed window.
+        g_hist_count[WHEEL_LEFT][g_hist_next]  = copy[WHEEL_LEFT].count;
+        g_hist_count[WHEEL_RIGHT][g_hist_next] = copy[WHEEL_RIGHT].count;
+        g_hist_us[g_hist_next]                 = now_us;
+        g_hist_next                            = (g_hist_next + 1u) %
+                                                 SPEED_WINDOW;
         state.distance_mm       = ((state.left_count + state.right_count) *
                                    UM_PER_EDGE) / (2 * UM_PER_MM);
         state.left_edge_age_ms  = (now_us - copy[WHEEL_LEFT].last_edge_us) /
@@ -204,28 +220,41 @@ encoder_task (INT start_code, void * p_ext_info)
 
 
 /*!
- * @brief Speed of one wheel from its last edge interval.
+ * @brief Speed of one wheel from its count over the last SPEED_WINDOW
+ *        periods.
  *
+ * @param[in] wheel    WHEEL_LEFT or WHEEL_RIGHT.
  * @param[in] p_wheel  Copied interrupt data of the wheel.
  * @param[in] now_us   Current time.
  *
  * @return Signed speed in mm/s; 0 if no edge arrived recently.
+ *
+ * @par
+ * The count rate is used rather than the last edge interval: with motor
+ * shaft encoders edges arrive every millisecond, two often share one
+ * interrupt, and a single interval then reads half the true speed.  The
+ * sign comes from the counted direction.
  */
 static int32_t
-wheel_speed (wheel_isr_t const * p_wheel, uint32_t now_us)
+wheel_speed (uint32_t wheel, wheel_isr_t const * p_wheel, uint32_t now_us)
 {
     int32_t speed = 0;
 
-    if ((0u != p_wheel->period_us) &&
-        ((now_us - p_wheel->last_edge_us) < EDGE_TIMEOUT_US))
+    if ((now_us - p_wheel->last_edge_us) < EDGE_TIMEOUT_US)
     {
-        // um/edge * 1000 / us/edge = mm/s.
-        // The tuned edge length is 500..30000, so the cast is exact.
-        uint32_t const magnitude = ((uint32_t) UM_PER_EDGE * US_PER_MS) /
-                                   p_wheel->period_us;
+        // The oldest sample in the ring is the one about to be replaced.
+        uint32_t const oldest   = g_hist_next;
+        uint32_t const span_ms  = (now_us - g_hist_us[oldest]) / US_PER_MS;
+        int32_t const  edges    = p_wheel->count - g_hist_count[wheel][oldest];
 
-        // magnitude is below 10^7, so the conversion to int32_t is exact.
-        speed = (int32_t) magnitude * p_wheel->direction;
+        if (span_ms > 0u)
+        {
+            // edges * um/edge / ms = um/ms = mm/s.  |edges| stays below
+            // 1000 in 50 ms and the edge length below 30000, so the
+            // product fits; span_ms is at most a few hundred, exact as
+            // int32_t.
+            speed = (edges * UM_PER_EDGE) / (int32_t) span_ms;
+        }
     }
 
     return (speed);

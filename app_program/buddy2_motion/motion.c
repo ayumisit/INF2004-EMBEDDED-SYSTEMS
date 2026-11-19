@@ -27,6 +27,7 @@
 #include "encoder.h"
 #include "pid_ctrl.h"
 #include "line_follow.h"
+#include "barcode.h"
 #include "motion.h"
 #include "tune.h"
 
@@ -35,10 +36,13 @@
 #define WHEEL_COUNT             2u
 #define GAIN_SCALE              1000
 #define PERMILLE_SCALE          1000
+#define PERCENT_SCALE           100u
 #define UM_PER_MM               1000u
 #define SPEED_FIELD_WIDTH       10u
 #define PID_TRIM_PERMILLE       500
 #define BRAKE_DECAY_DIVISOR     2
+#define BRAKE_TIMEOUT_MS        500u
+#define STALL_GAP_FACTOR        3u
 #define DECEL_GAIN              4u
 #define DECEL_FLOOR_MM_S        80u
 #define MS_PER_PERIOD           (PERIOD_BASE_MS * PERIOD_MOTION_TICKS)
@@ -48,6 +52,7 @@
 // 2^16, so each cast is exact.
 #define MIN_DRIVE               ((int32_t) MOTOR_MIN_PERMILLE)
 #define FEED_PER_M_S            ((int32_t) MOTOR_FF_PERMILLE_PER_M_S)
+
 #define STOPPED_SPEED           ((int32_t) STOPPED_SPEED_MM_S)
 
 // Wheel travel per degree of an on-the-spot turn is pi * track / 360, in
@@ -71,10 +76,25 @@ typedef struct
     int32_t         target[WHEEL_COUNT];
     int32_t         output[WHEEL_COUNT];
     int32_t         prev_offset;
+    uint32_t        straight_ms;    // Steering held for a barcode, ms.
     pid_ctrl_t      pid[WHEEL_COUNT];
 } motion_ctx_t;
 
 static motion_ctx_t g_ctx;
+
+// DIAGNOSTIC BUILD ONLY: ring of line-following samples.
+#define REC_SLOTS               800u
+static motion_rec_t g_rec[REC_SLOTS];
+static uint32_t     g_rec_next  = 0u;
+static uint32_t     g_rec_count = 0u;
+static uint32_t     g_rec_total = 0u;
+
+// Lowest line-following speed of each wheel, in WHEEL_LEFT, WHEEL_RIGHT
+// order.  Casts: small unsigned constants, exact.
+static int32_t const g_wheel_min[WHEEL_COUNT] =
+{
+    (int32_t) FOLLOW_LEFT_MIN_MM_S, (int32_t) FOLLOW_RIGHT_MIN_MM_S
+};
 static uint64_t     g_stack[STACK_MEDIUM / sizeof(uint64_t)];
 
 static void     motion_task(INT start_code, void * p_ext_info);
@@ -87,8 +107,10 @@ static void     set_targets(encoder_state_t const * p_enc);
 static void     follow_targets(void);
 static uint32_t travelled_um(encoder_state_t const * p_enc);
 static uint32_t turn_um_per_deg(void);
+static uint32_t turn_goal_um(int32_t angle_deg);
 static void     drive_wheels(encoder_state_t const * p_enc);
 static void     check_stall(encoder_state_t const * p_enc);
+static bool     is_wheel_stalled(uint32_t wheel, uint32_t edge_age_ms);
 static void     enter_mode(motion_mode_t mode);
 static void     publish_status(encoder_state_t const * p_enc);
 static int32_t  sign_of(int32_t value);
@@ -241,6 +263,57 @@ motion_stop (void)
 
 
 /*!
+ * @brief DIAGNOSTIC BUILD ONLY: number of recorded samples.
+ *
+ * @return Count, at most REC_SLOTS.
+ */
+uint32_t
+motion_rec_count (void)
+{
+    return (g_rec_count);
+}
+
+
+/*!
+ * @brief DIAGNOSTIC BUILD ONLY: samples recorded since start-up.
+ *
+ * @return Total, which changes whenever the record has changed.
+ */
+uint32_t
+motion_rec_serial (void)
+{
+    return (g_rec_total);
+}
+
+
+/*!
+ * @brief DIAGNOSTIC BUILD ONLY: whether the record is not being written.
+ *
+ * @return true when the robot is not line following.
+ */
+bool
+motion_rec_is_idle (void)
+{
+    return (MOTION_MODE_FOLLOWING != g_ctx.mode);
+}
+
+
+/*!
+ * @brief DIAGNOSTIC BUILD ONLY: one recorded sample, oldest first.
+ *
+ * @param[in]  index  0 for the oldest sample.
+ * @param[out] p_rec  The sample.
+ */
+void
+motion_rec_get (uint32_t index, motion_rec_t * p_rec)
+{
+    uint32_t const first = (g_rec_next + REC_SLOTS - g_rec_count) % REC_SLOTS;
+
+    *p_rec = g_rec[(first + index) % REC_SLOTS];
+}
+
+
+/*!
  * @brief Pack a motion command into its 29-bit word.
  *
  * @param[in] type        Command type.
@@ -291,6 +364,24 @@ motion_task (INT start_code, void * p_ext_info)
         take_commands(&enc);
         set_targets(&enc);
         drive_wheels(&enc);
+
+        if (MOTION_MODE_FOLLOWING == g_ctx.mode)
+        {
+            motion_rec_t * const p_rec = &g_rec[g_rec_next];
+
+            p_rec->line_word = line_follow_read();
+            p_rec->target[0] = (int16_t) g_ctx.target[WHEEL_LEFT];  // Fits.
+            p_rec->target[1] = (int16_t) g_ctx.target[WHEEL_RIGHT];  // Fits.
+            p_rec->speed[0]  = (int16_t) enc.left_speed_mm_s;  // Fits.
+            p_rec->speed[1]  = (int16_t) enc.right_speed_mm_s;  // Fits.
+            p_rec->output[0] = (int16_t) g_ctx.output[WHEEL_LEFT];  // Fits.
+            p_rec->output[1] = (int16_t) g_ctx.output[WHEEL_RIGHT];  // Fits.
+            g_rec_next       = (g_rec_next + 1u) % REC_SLOTS;
+            g_rec_count      = (g_rec_count < REC_SLOTS) ?
+                               (g_rec_count + 1u) : REC_SLOTS;
+            g_rec_total++;
+        }
+
         check_stall(&enc);
         publish_status(&enc);
         g_ctx.mode_age_ms += MS_PER_PERIOD;
@@ -405,8 +496,7 @@ start_mode (uint32_t type, int32_t arg)
         break;
 
         case MOTION_CMD_TURN:
-            g_ctx.goal_um = (uint32_t) fix_math_abs(arg) *  // Non-negative.
-                            turn_um_per_deg();
+            g_ctx.goal_um = turn_goal_um(arg);
             enter_mode(MOTION_MODE_TURNING);
         break;
 
@@ -480,15 +570,34 @@ set_targets (encoder_state_t const * p_enc)
 static void
 follow_targets (void)
 {
-    uint32_t const word = line_follow_read();
-    int32_t const  base = (int32_t) g_ctx.speed_mm_s;  // At most 1023.
+    uint32_t const word      = line_follow_read();
+    int32_t const  base      = (int32_t) g_ctx.speed_mm_s;  // At most 1023.
+    // Cast: the enumeration value is below 8, so the conversion is exact.
+    bool const     b_reading = (((uint32_t) BARCODE_STATE_CAPTURING) ==
+                                bitpack_word_get(
+                                    sys_status_read(SYS_STATUS_BARCODE),
+                                    BARCODE_STATE_SHIFT,
+                                    BARCODE_STATE_WIDTH));
+    int32_t        goal[WHEEL_COUNT];
 
-    if (line_follow_age_ms(word) > LINE_STALE_MS)
+    // While the barcode sensor is crossing bars, hold the steering so it
+    // crosses them square and at a steady speed (the line is straight at
+    // the barcodes), for at most BARCODE_STRAIGHT_MS in case it misfires.
+    g_ctx.straight_ms = b_reading ? (g_ctx.straight_ms + MS_PER_PERIOD) : 0u;
+
+    if (b_reading && (g_ctx.straight_ms <= BARCODE_STRAIGHT_MS))
+    {
+        goal[WHEEL_LEFT]  = base;
+        goal[WHEEL_RIGHT] = base;
+        g_ctx.prev_offset = tune_get(TUNE_STEER_DIR) *
+                            line_follow_offset(word);  // No D kick after.
+    }
+    else if (line_follow_age_ms(word) > LINE_STALE_MS)
     {
         // Stale steering data: go straight and slowly (Week 6 negotiation
         // point with Buddy 3 on steering-data age).
-        g_ctx.target[WHEEL_LEFT]  = tune_get(TUNE_SPEED_SLOW);
-        g_ctx.target[WHEEL_RIGHT] = tune_get(TUNE_SPEED_SLOW);
+        goal[WHEEL_LEFT]  = tune_get(TUNE_SPEED_SLOW);
+        goal[WHEEL_RIGHT] = tune_get(TUNE_SPEED_SLOW);
     }
     else
     {
@@ -498,11 +607,37 @@ follow_targets (void)
                                 (tune_get(TUNE_STEER_KD) *
                                  (offset - g_ctx.prev_offset))) /
                                GAIN_SCALE;
-        int32_t const steer  = fix_math_clamp(raw, -base, base);
+        // Cast: the percentage is below 100, so the conversion is exact.
+        int32_t const limit  = (base * (int32_t) STEER_LIMIT_PERCENT) / 100;
+        int32_t const steer  = fix_math_clamp(raw, -limit, limit);
 
-        g_ctx.target[WHEEL_LEFT]  = base + steer;
-        g_ctx.target[WHEEL_RIGHT] = base - steer;
-        g_ctx.prev_offset         = offset;
+        goal[WHEEL_LEFT]  = base + steer;
+        goal[WHEEL_RIGHT] = base - steer;
+        g_ctx.prev_offset = offset;
+
+        // Keep each wheel above the speed where its motor sticks, and
+        // give the other wheel what was added, so the turn rate is kept.
+        for (uint32_t wheel = 0u; wheel < WHEEL_COUNT; wheel++)
+        {
+            int32_t const lack = g_wheel_min[wheel] - goal[wheel];
+
+            if (lack > 0)
+            {
+                goal[wheel]                           += lack;
+                goal[(WHEEL_COUNT - 1u) - wheel]      += lack;
+            }
+        }
+    }
+
+    // Slew-limit each wheel so steering changes and the start from rest
+    // are spread over several periods instead of one step.
+    for (uint32_t wheel = 0u; wheel < WHEEL_COUNT; wheel++)
+    {
+        g_ctx.target[wheel] = fix_math_clamp(goal[wheel],
+                                             g_ctx.target[wheel] -
+                                             FOLLOW_SLEW_MM_S,
+                                             g_ctx.target[wheel] +
+                                             FOLLOW_SLEW_MM_S);
     }
 }
 
@@ -519,6 +654,33 @@ turn_um_per_deg (void)
     uint32_t const track_mm = (uint32_t) tune_get(TUNE_TRACK_MM);
 
     return ((track_mm * UM_PER_MM * PI_NUM) / (DEG_PER_REV * PI_DEN));
+}
+
+
+/*!
+ * @brief Wheel travel for an on-the-spot turn, with the side's size
+ *        correction applied.
+ *
+ * @param[in] angle_deg  Signed angle; positive is left (motion_turn_left).
+ *
+ * @return Travel of each wheel in um.
+ *
+ * @par
+ * The robot coasts on after the wheels reach their distance, by a
+ * different amount on each side, so each side has its own percentage
+ * (TUNE_TURN_LEFT_PERCENT, TUNE_TURN_RIGHT_PERCENT).
+ */
+static uint32_t
+turn_goal_um (int32_t angle_deg)
+{
+    // The tuned percentages are 50..150 and |angle| is below 2^15, so both
+    // casts are exact and the product stays far below 2^32.
+    uint32_t const percent = (uint32_t) tune_get((angle_deg >= 0) ?
+                                                 TUNE_TURN_LEFT_PERCENT :
+                                                 TUNE_TURN_RIGHT_PERCENT);
+    uint32_t const angle   = (uint32_t) fix_math_abs(angle_deg);
+
+    return ((angle * turn_um_per_deg() * percent) / PERCENT_SCALE);
 }
 
 
@@ -590,10 +752,12 @@ drive_wheels (encoder_state_t const * p_enc)
                           sign_of(g_ctx.output[WHEEL_RIGHT]));
     motor_hw_set(g_ctx.output[WHEEL_LEFT], g_ctx.output[WHEEL_RIGHT]);
 
-    // Braking ends once both wheels have (almost) stopped.
+    // Braking ends once both wheels have (almost) stopped, or after a time
+    // limit, so encoder noise on a stopped wheel cannot hold up the next step.
     if ((MOTION_MODE_BRAKING == g_ctx.mode) &&
-        (fix_math_abs(p_enc->left_speed_mm_s) < STOPPED_SPEED) &&
-        (fix_math_abs(p_enc->right_speed_mm_s) < STOPPED_SPEED))
+        (((fix_math_abs(p_enc->left_speed_mm_s) < STOPPED_SPEED) &&
+          (fix_math_abs(p_enc->right_speed_mm_s) < STOPPED_SPEED)) ||
+         (g_ctx.mode_age_ms >= BRAKE_TIMEOUT_MS)))
     {
         motor_hw_set(0, 0);
         enter_mode(MOTION_MODE_IDLE);
@@ -617,12 +781,10 @@ check_stall (encoder_state_t const * p_enc)
     bool const b_driving = (MOTION_MODE_FOLLOWING == g_ctx.mode) ||
                            (MOTION_MODE_MOVING == g_ctx.mode) ||
                            (MOTION_MODE_TURNING == g_ctx.mode);
-    bool const b_left    = (fix_math_abs(g_ctx.output[WHEEL_LEFT]) >=
-                            MIN_DRIVE) &&
-                           (p_enc->left_edge_age_ms > STALL_TIMEOUT_MS);
-    bool const b_right   = (fix_math_abs(g_ctx.output[WHEEL_RIGHT]) >=
-                            MIN_DRIVE) &&
-                           (p_enc->right_edge_age_ms > STALL_TIMEOUT_MS);
+    bool const b_left    = is_wheel_stalled(WHEEL_LEFT,
+                                            p_enc->left_edge_age_ms);
+    bool const b_right   = is_wheel_stalled(WHEEL_RIGHT,
+                                            p_enc->right_edge_age_ms);
 
     if (b_driving && (g_ctx.mode_age_ms > STALL_TIMEOUT_MS) &&
         (b_left || b_right))
@@ -647,6 +809,47 @@ enter_mode (motion_mode_t mode)
 {
     g_ctx.mode        = mode;
     g_ctx.mode_age_ms = 0u;
+
+    // A new mode starts clean: trim wound up in a turn must not carry into
+    // the next move, where it would keep the robot turning.
+    for (uint32_t wheel = 0u; wheel < WHEEL_COUNT; wheel++)
+    {
+        pid_ctrl_reset(&g_ctx.pid[wheel]);
+    }
+}
+
+
+/*!
+ * @brief Decide whether one driven wheel has stopped producing edges.
+ *
+ * @param[in] wheel        WHEEL_LEFT or WHEEL_RIGHT.
+ * @param[in] edge_age_ms  Time since the wheel's last edge.
+ *
+ * @return true if the wheel is driven and its edges are overdue.
+ *
+ * @par
+ * A slowed inner wheel is still moving even when its edges are far apart,
+ * so the limit grows with the edge interval expected at the target speed.
+ */
+static bool
+is_wheel_stalled (uint32_t wheel, uint32_t edge_age_ms)
+{
+    int32_t const target    = fix_math_abs(g_ctx.target[wheel]);
+    bool          b_stalled = false;
+
+    if ((0 != target) && (fix_math_abs(g_ctx.output[wheel]) >= MIN_DRIVE))
+    {
+        // um per edge / mm per s = ms per edge.  Both are positive here, so
+        // the casts are exact.
+        uint32_t const gap_ms = (uint32_t) tune_get(TUNE_ENC_UM_PER_EDGE) /
+                                (uint32_t) target;
+        uint32_t const limit  = gap_ms * STALL_GAP_FACTOR;
+
+        b_stalled = edge_age_ms > ((limit > STALL_TIMEOUT_MS) ?
+                                   limit : STALL_TIMEOUT_MS);
+    }
+
+    return (b_stalled);
 }
 
 

@@ -80,6 +80,21 @@ bool     motion_stop(void);
 uint32_t motion_pack_command(motion_cmd_type_t type, uint32_t speed_mm_s,
                              int32_t argument);
 
+// DIAGNOSTIC BUILD ONLY: the last seconds of line following, one entry
+// per 10 ms period, for the USB monitor to print after a run.
+typedef struct
+{
+    uint32_t    line_word;      // SYS_STATUS_LINE word used for steering.
+    int16_t     target[2];      // Wheel speed targets, left then right.
+    int16_t     speed[2];       // Measured wheel speeds.
+    int16_t     output[2];      // Motor drive, permille.
+} motion_rec_t;
+
+uint32_t motion_rec_count(void);
+uint32_t motion_rec_serial(void);
+bool     motion_rec_is_idle(void);
+void     motion_rec_get(uint32_t index, motion_rec_t * p_rec);
+
 #endif /* MOTION_H */
 
 /*** end of file ***/
