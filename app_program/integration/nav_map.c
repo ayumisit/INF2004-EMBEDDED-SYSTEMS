@@ -3,9 +3,15 @@
  * @brief Barcode letter to navigation action map.
  *
  * @par
- * Default map (project brief): A = turn left, B = turn right,
- * C = go straight, D = U-turn; every other letter goes straight, which is
- * also what the robot does at a junction with no barcode latched.
+ * No letter is hard-coded (module requirement, 2026-10-24): the lecturer
+ * gives four letters for forward, U-turn, left and right just before the
+ * demo, and they arrive over MQTT (MAP_SET).  Until then, and for every
+ * letter not in the current map, the action is go straight, which is also
+ * what the robot does at a junction with no barcode latched.
+ * @par
+ * A MAP_SET with a new version starts a new map: every letter goes back to
+ * straight before the new one is applied, so letters from an earlier map
+ * cannot linger.  The four letters of one map share one version.
  *
  * @par
  * COPYRIGHT NOTICE: (c) 2026 AAI03 team, INF2004.  All rights reserved.
@@ -18,18 +24,15 @@
 #include "nav_map.h"
 
 #define LETTERS_PER_WORD        16u
-#define LETTER_A                0u
-#define LETTER_B                1u
-#define LETTER_C                2u
-#define LETTER_D                3u
 #define ACTION_COUNT            4u
 
+static void     clear_map(nav_map_t * p_map);
 static uint32_t word_index(uint32_t letter);
 static uint32_t field_shift(uint32_t letter);
 
 
 /*!
- * @brief Load the default map, version 0.
+ * @brief Start with no letter mapped (every letter straight), version 0.
  *
  * @param[out] p_map  Map.
  */
@@ -37,7 +40,18 @@ void
 nav_map_init (nav_map_t * p_map)
 {
     p_map->version = 0u;
+    clear_map(p_map);
+}
 
+
+/*!
+ * @brief Set every letter back to go straight.
+ *
+ * @param[out] p_map  Map.
+ */
+static void
+clear_map (nav_map_t * p_map)
+{
     for (uint32_t idx = 0u; idx < NAV_MAP_WORDS; idx++)
     {
         p_map->words[idx] = 0u;
@@ -50,12 +64,6 @@ nav_map_init (nav_map_t * p_map)
                              field_shift(letter), NAV_MAP_ACTION_WIDTH,
                              (uint32_t) NAV_ACTION_STRAIGHT);  // Enum < 4.
     }
-
-    // (void): these constant letters and actions are always valid.
-    (void) nav_map_set(p_map, LETTER_A, NAV_ACTION_LEFT, 0u);
-    (void) nav_map_set(p_map, LETTER_B, NAV_ACTION_RIGHT, 0u);
-    (void) nav_map_set(p_map, LETTER_C, NAV_ACTION_STRAIGHT, 0u);
-    (void) nav_map_set(p_map, LETTER_D, NAV_ACTION_UTURN, 0u);
 }
 
 
@@ -113,6 +121,10 @@ nav_map_get (nav_map_t const * p_map, uint32_t letter)
  *
  * @return true if applied; false (map unchanged) for an invalid letter or
  *         action.
+ *
+ * @par
+ * A version different from the current one starts a new map: every other
+ * letter goes back to straight first.
  */
 bool
 nav_map_set (nav_map_t * p_map, uint32_t letter, uint32_t action,
@@ -123,6 +135,12 @@ nav_map_set (nav_map_t * p_map, uint32_t letter, uint32_t action,
     if ((letter < NAV_MAP_LETTERS) && (action < ACTION_COUNT))
     {
         uint32_t const idx = word_index(letter);
+
+        if (bitpack_saturate(version, NAV_MAP_VERSION_WIDTH) !=
+            p_map->version)
+        {
+            clear_map(p_map);
+        }
 
         p_map->words[idx] = bitpack_word_set(p_map->words[idx],
                                              field_shift(letter),
