@@ -1,6 +1,7 @@
 /** @file lsm303_hw.c
  *
- * @brief LSM303DLHC accelerometer and magnetometer driver on Pico SDK I2C.
+ * @brief LSM303DLHC / LSM303D accelerometer and magnetometer driver on Pico
+ *        SDK I2C.
  *
  * @par
  * Reference: ST LSM303DLHC datasheet (DocID018771), register maps in
@@ -8,6 +9,13 @@
  * address 0x1E).  Accelerometer: 100 Hz, +/-2 g, high-resolution mode,
  * 1 mg per LSB after the 4-bit left justification is removed.
  * Magnetometer: 30 Hz, +/-1.3 gauss, continuous conversion.
+ *
+ * @par
+ * Some GY-511 boards carry an LSM303D instead (ST DocID023312): one device
+ * at 0x1E (SA0 high) for both sensors, WHO_AM_I 0x49, little-endian
+ * outputs.  Accelerometer: 100 Hz, +/-2 g, 0.061 mg per LSB.
+ * Magnetometer: 25 Hz, high resolution, +/-4 gauss, continuous.  The chip
+ * is detected in lsm303_hw_init() and both report in the same units.
  *
  * @par
  * Every transfer has a timeout so a disconnected or stuck sensor can never
@@ -53,26 +61,71 @@
 #define RANGE_16                65536
 #define JUSTIFY_DIVISOR         16
 
+// LSM303D (DocID023312 section 8).  Its address depends on the SA0 pin:
+// 0x1D when low (the GY-511 on this robot), 0x1E when high.
+#define D_ADDR_SA0_LOW          0x1Du
+#define D_ADDR_SA0_HIGH         0x1Eu
+#define D_REG_WHO_AM_I          0x0Fu
+#define D_REG_OUT_X_L_M         0x08u
+#define D_REG_CTRL1             0x20u
+#define D_REG_CTRL2             0x21u
+#define D_REG_CTRL5             0x24u
+#define D_REG_CTRL6             0x25u
+#define D_REG_CTRL7             0x26u
+#define D_REG_OUT_X_L_A         0x28u
+#define D_IDENTITY              0x49u
+// Reboot (reload the factory trimming) before every configuration.  Seen
+// 2026-11-17: after a battery-only power-on the accelerometer answered and
+// kept its settings but its readings never changed, and re-writing the
+// settings did not help.  BOOT reloads the chip's internal memory, the
+// nearest thing to a power cycle that software can do (DocID023312 CTRL0;
+// DLHC: DocID018771 CTRL_REG5_A).
+#define D_REG_CTRL0             0x1Fu
+#define D_CTRL0_BOOT            0x80u
+#define REG_CTRL5_A             0x24u
+#define CTRL5_A_BOOT            0x80u
+#define BOOT_WAIT_US            20000u  // Boot takes about 5 ms.
+#define D_CTRL1_100HZ_XYZ       0x67u   // AODR 100 Hz, X/Y/Z enabled.
+#define D_CTRL2_2G              0x00u   // +/-2 g, 773 Hz anti-alias filter.
+#define D_CTRL5_HR_25HZ         0x6Cu   // Magnetic high resolution, 25 Hz.
+#define D_CTRL6_4GAUSS          0x20u   // +/-4 gauss.
+#define D_CTRL7_CONTINUOUS      0x00u   // Magnetic continuous conversion.
+#define D_UG_PER_LSB            61      // 0.061 mg per LSB at +/-2 g.
+#define UG_PER_MG               1000
+
+/*!
+ * @brief Which chip lsm303_hw_init() found.
+ */
+typedef enum
+{
+    CHIP_NONE = 0,
+    CHIP_DLHC,
+    CHIP_D
+} chip_t;
+
+static chip_t  g_chip   = CHIP_NONE;
+static uint8_t g_d_addr = D_ADDR_SA0_LOW;  // LSM303D address found.
+
+static bool    init_dlhc(void);
+static bool    init_d(uint8_t address);
 static bool    write_register(uint8_t address, uint8_t reg, uint8_t value);
 static bool    read_registers(uint8_t address, uint8_t first_reg,
                               uint8_t * p_data, uint32_t count);
 static int32_t to_signed(uint32_t high, uint32_t low);
 static void    recover_bus(void);
+static void    reboot_chip(uint8_t address, uint8_t reg, uint8_t boot_bit);
 static void    wait_us(uint32_t delay_us);
 
 
 /*!
- * @brief Recover the bus, start I2C0 and configure both sensors.
+ * @brief Recover the bus, start I2C0, detect the chip and configure it.
  *
- * @return true if the magnetometer identified itself and both sensors
- *         accepted their configuration.
+ * @return true if an LSM303DLHC or LSM303D identified itself and accepted
+ *         its configuration.
  */
 bool
 lsm303_hw_init (void)
 {
-    uint8_t identity = 0u;
-    bool    b_ok     = false;
-
     recover_bus();
     (void) i2c_init(i2c0, IMU_I2C_HZ);  // The actual rate is not needed.
     gpio_set_function(PIN_IMU_SDA, GPIO_FUNC_I2C);
@@ -80,15 +133,97 @@ lsm303_hw_init (void)
     gpio_pull_up(PIN_IMU_SDA);
     gpio_pull_up(PIN_IMU_SCL);
 
-    b_ok = (read_registers(MAG_ADDR, REG_IRA_M, &identity, 1u)) &&
-           (IRA_M_IDENTITY == identity) &&
-           (write_register(ACCEL_ADDR, REG_CTRL1_A, CTRL1_A_100HZ_XYZ)) &&
-           (write_register(ACCEL_ADDR, REG_CTRL4_A, CTRL4_A_HR_2G)) &&
-           (write_register(MAG_ADDR, REG_CRA_M, CRA_M_30HZ)) &&
-           (write_register(MAG_ADDR, REG_CRB_M, CRB_M_1G3)) &&
-           (write_register(MAG_ADDR, REG_MR_M, MR_M_CONTINUOUS));
+    if (init_dlhc())
+    {
+        g_chip = CHIP_DLHC;
+    }
+    else if ((init_d(D_ADDR_SA0_LOW)) || (init_d(D_ADDR_SA0_HIGH)))
+    {
+        g_chip = CHIP_D;
+    }
+    else
+    {
+        g_chip = CHIP_NONE;
+    }
 
-    return (b_ok);
+    return (CHIP_NONE != g_chip);
+}
+
+
+/*!
+ * @brief Identify and configure an LSM303DLHC.
+ *
+ * @return true if the magnetometer identified itself and both sensors
+ *         accepted their configuration.
+ */
+static bool
+init_dlhc (void)
+{
+    uint8_t identity = 0u;
+    bool    b_found  = false;
+
+    b_found = (read_registers(MAG_ADDR, REG_IRA_M, &identity, 1u)) &&
+              (IRA_M_IDENTITY == identity);
+
+    if (b_found)
+    {
+        reboot_chip(ACCEL_ADDR, REG_CTRL5_A, CTRL5_A_BOOT);
+    }
+
+    return (b_found &&
+            (write_register(ACCEL_ADDR, REG_CTRL1_A, CTRL1_A_100HZ_XYZ)) &&
+            (write_register(ACCEL_ADDR, REG_CTRL4_A, CTRL4_A_HR_2G)) &&
+            (write_register(MAG_ADDR, REG_CRA_M, CRA_M_30HZ)) &&
+            (write_register(MAG_ADDR, REG_CRB_M, CRB_M_1G3)) &&
+            (write_register(MAG_ADDR, REG_MR_M, MR_M_CONTINUOUS)));
+}
+
+
+/*!
+ * @brief Identify and configure an LSM303D at one address.
+ *
+ * @param[in] address  0x1D or 0x1E (SA0 low or high).
+ *
+ * @return true if WHO_AM_I matched and every control register was written;
+ *         the address is then kept for reading.
+ */
+static bool
+init_d (uint8_t address)
+{
+    uint8_t identity = 0u;
+    uint8_t ctrl1    = 0u;
+    bool    b_found  = false;
+    bool    b_ok     = false;
+    bool    b_set    = false;
+
+    b_found = (read_registers(address, D_REG_WHO_AM_I, &identity, 1u)) &&
+              (D_IDENTITY == identity);
+
+    if (b_found)
+    {
+        reboot_chip(address, D_REG_CTRL0, D_CTRL0_BOOT);
+    }
+
+    b_ok = (b_found &&
+            (write_register(address, D_REG_CTRL1, D_CTRL1_100HZ_XYZ)) &&
+            (write_register(address, D_REG_CTRL2, D_CTRL2_2G)) &&
+            (write_register(address, D_REG_CTRL5, D_CTRL5_HR_25HZ)) &&
+            (write_register(address, D_REG_CTRL6, D_CTRL6_4GAUSS)) &&
+            (write_register(address, D_REG_CTRL7, D_CTRL7_CONTINUOUS)));
+
+    // Read the accelerometer setting back.  A write made while the chip is
+    // still starting up is acknowledged but lost, which leaves the
+    // accelerometer switched off and its readings frozen.
+    b_set = b_ok &&
+            (read_registers(address, D_REG_CTRL1, &ctrl1, 1u)) &&
+            (D_CTRL1_100HZ_XYZ == ctrl1);
+
+    if (b_set)
+    {
+        g_d_addr = address;
+    }
+
+    return (b_set);
 }
 
 
@@ -103,17 +238,23 @@ bool
 lsm303_hw_read_accel (int32_t * p_accel_mg)
 {
     uint8_t    data[DATA_BYTES];
-    bool const b_ok = read_registers(ACCEL_ADDR,
-                                     REG_OUT_X_L_A | REG_AUTO_INCREMENT,
-                                     data, DATA_BYTES);
+    bool const b_d  = (CHIP_D == g_chip);
+    bool const b_ok = read_registers(b_d ? g_d_addr : ACCEL_ADDR,
+                                     (b_d ? D_REG_OUT_X_L_A : REG_OUT_X_L_A) |
+                                     REG_AUTO_INCREMENT, data, DATA_BYTES);
 
     if (b_ok)
     {
-        // Little-endian X, Y, Z; 12-bit values left-justified in 16 bits.
+        // Little-endian X, Y, Z on both chips.  DLHC: 12-bit values
+        // left-justified in 16 bits.  D: 16 bits at 0.061 mg per LSB, so
+        // |raw| * 61 stays below 2^21.
         for (uint32_t axis = 0u; axis < LSM303_HW_AXES; axis++)
         {
-            p_accel_mg[axis] = to_signed(data[(2u * axis) + 1u],
-                                         data[2u * axis]) / JUSTIFY_DIVISOR;
+            int32_t const raw = to_signed(data[(2u * axis) + 1u],
+                                          data[2u * axis]);
+
+            p_accel_mg[axis] = b_d ? ((raw * D_UG_PER_LSB) / UG_PER_MG) :
+                                     (raw / JUSTIFY_DIVISOR);
         }
     }
 
@@ -132,15 +273,31 @@ bool
 lsm303_hw_read_mag (int32_t * p_field)
 {
     uint8_t    data[DATA_BYTES];
-    bool const b_ok = read_registers(MAG_ADDR, REG_OUT_X_H_M, data,
+    bool const b_d  = (CHIP_D == g_chip);
+    bool const b_ok = b_d ?
+                      read_registers(g_d_addr,
+                                     D_REG_OUT_X_L_M | REG_AUTO_INCREMENT,
+                                     data, DATA_BYTES) :
+                      read_registers(MAG_ADDR, REG_OUT_X_H_M, data,
                                      DATA_BYTES);
 
-    if (b_ok)
+    if (b_ok && b_d)
     {
-        // Big-endian, and the register order is X, Z, Y.
+        // LSM303D: little-endian X, Y, Z.
+        p_field[LSM303_HW_AXIS_X] = to_signed(data[1], data[0]);
+        p_field[LSM303_HW_AXIS_Y] = to_signed(data[3], data[2]);
+        p_field[LSM303_HW_AXIS_Z] = to_signed(data[5], data[4]);
+    }
+    else if (b_ok)
+    {
+        // LSM303DLHC: big-endian, and the register order is X, Z, Y.
         p_field[LSM303_HW_AXIS_X] = to_signed(data[0], data[1]);
         p_field[LSM303_HW_AXIS_Z] = to_signed(data[2], data[3]);
         p_field[LSM303_HW_AXIS_Y] = to_signed(data[4], data[5]);
+    }
+    else
+    {
+        // Read failed: outputs unchanged.
     }
 
     return (b_ok);
@@ -248,6 +405,28 @@ recover_bus (void)
         gpio_put(PIN_IMU_SCL, true);
         wait_us(RECOVERY_HALF_PERIOD_US);
     }
+}
+
+
+/*!
+ * @brief Reboot a sensor (reload its factory trimming) and wait for it.
+ *
+ * @param[in] address   7-bit device address.
+ * @param[in] reg       Register holding the BOOT bit.
+ * @param[in] boot_bit  Value that sets the BOOT bit.
+ *
+ * @par
+ * See BOOT_WAIT_US.  A failed write is not an error here: the
+ * configuration that follows is checked and fails on its own.  The wait
+ * runs in the IMU Task, below the motion and line tasks in priority.
+ */
+static void
+reboot_chip (uint8_t address, uint8_t reg, uint8_t boot_bit)
+{
+    // The (void) discards the result: the configuration after this is
+    // checked, so a lost reboot shows up there.
+    (void) write_register(address, reg, boot_bit);
+    wait_us(BOOT_WAIT_US);
 }
 
 

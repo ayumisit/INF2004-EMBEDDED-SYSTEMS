@@ -5,16 +5,20 @@
  *
  * @par
  * Pure module (no kernel or hardware dependency), unit-tested on the host.
- * A hump is the sequence LEVEL, CLIMBING, DESCENDING, LEVEL.  While on the
- * hump, height is integrated as encoder distance x sin(pitch); the peak of
- * that integral is the hump height.  Levelling out during CLIMBING is a
- * false start and is discarded, and an invalid sample abandons the hump, so
- * invalid data can never update the running maximum (assumption A4).
+ * The input is the tilt: how far the robot leans from its calibrated level
+ * in any direction (pitch and roll combined), so it is never negative and
+ * it does not matter which wheel crosses the hump or how the IMU is turned
+ * on the chassis.  A hump is LEVEL, then CLIMBING while the tilt rises,
+ * DESCENDING while it falls, then LEVEL again, when it is reported.
  *
  * @par
- * NOTE: distance x sin(pitch) assumes both wheels climb together.  A hump
- * crossed by one wheel only is an open hypothesis (Week 6 A4) to be checked
- * against reference measurements.
+ * Height: the course hump is crossed by one drive wheel, so the chassis
+ * pivots about the line through the other wheel and the caster.  The lifted
+ * wheel then rises lever x sin(peak tilt), where the lever is that wheel's
+ * distance from the pivot line.  The peak tilt is never negative, so
+ * neither is the height.  An invalid sample, or a tilt that lasts longer
+ * than a hump can, abandons the hump, so bad data never updates the running
+ * maximum (assumption A4).
  *
  * @par
  * COPYRIGHT NOTICE: (c) 2026 AAI03 team, INF2004.  All rights reserved.
@@ -41,25 +45,25 @@ typedef enum
  */
 typedef struct
 {
-    int32_t         enter_mdeg;     // Pitch magnitude that starts a phase.
-    int32_t         exit_mdeg;      // Pitch magnitude that counts as level.
+    int32_t         enter_mdeg;     // Tilt that starts a hump.
+    int32_t         exit_mdeg;      // Tilt below which the robot is level.
     uint32_t        hold_ms;        // Time a condition must persist.
+    uint32_t        lever_mm;       // Lifted wheel to pivot line.
     hump_state_t    state;
     uint32_t        timer_ms;       // Time the transition condition held.
-    uint32_t        level_ms;       // Time spent level while CLIMBING.
-    int32_t         last_distance_mm;
-    int32_t         height_um;
-    int32_t         peak_um;
+    uint32_t        hump_ms;        // Time since the hump started.
+    int32_t         peak_mdeg;      // Largest tilt on this hump.
+    bool            b_blocked;      // Abandoned: wait for level first.
     uint32_t        max_mm;
     uint32_t        count;
 } hump_t;
 
 void         hump_init(hump_t * p_hump, int32_t enter_mdeg, int32_t exit_mdeg,
-                       uint32_t hold_ms);
-bool         hump_update(hump_t * p_hump, int32_t pitch_mdeg,
-                         int32_t distance_mm, bool b_valid, uint32_t dt_ms,
-                         uint32_t * p_height_mm);
+                       uint32_t hold_ms, uint32_t lever_mm);
+bool         hump_update(hump_t * p_hump, int32_t tilt_mdeg, bool b_valid,
+                         uint32_t dt_ms, uint32_t * p_height_mm);
 hump_state_t hump_state(hump_t const * p_hump);
+uint32_t     hump_height_mm(hump_t const * p_hump, int32_t tilt_mdeg);
 uint32_t     hump_max_mm(hump_t const * p_hump);
 uint32_t     hump_count(hump_t const * p_hump);
 
