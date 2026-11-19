@@ -21,7 +21,8 @@ APP_ROOT     := ../app_program
 APP_SUBDIRS  := platform buddy1_comms buddy2_motion buddy3_line \
                 buddy4_imu buddy5_obstacle integration
 
-APP_SRCS     := $(wildcard $(APP_ROOT)/*.c) \
+# demo_tasks.c is the kernel demo left over from the port: not part of the robot.
+APP_SRCS     := $(filter-out $(APP_ROOT)/demo_tasks.c,$(wildcard $(APP_ROOT)/*.c)) \
                 $(foreach dir,$(APP_SUBDIRS),$(wildcard $(APP_ROOT)/$(dir)/*.c))
 APP_HW_SRCS  := $(filter %_hw.c %_net.c,$(APP_SRCS))
 APP_KNL_SRCS := $(filter-out $(APP_HW_SRCS),$(APP_SRCS))
@@ -46,13 +47,15 @@ APP_KERNEL_INCLUDES := $(subst -I,-isystem ,$(INCPATH))
 APP_WARNINGS := -Wall -Wextra -Werror -Wshadow -Wsign-compare -Wsign-conversion \
                 -Wstrict-prototypes -Wmissing-prototypes
 
-# Bench tests (BUDDY_TEST=3 Buddy 3 alone, 23 Buddy 2 + 3; 0 is the mission)
-# and the USB console monitor for the mission (DEBUG_MON=1).
-# The stamp file name carries the value, and the recipe deletes the other
-# stamps, so app_main.c is rebuilt whenever the value changes.
-BUDDY_TEST ?= 0
-DEBUG_MON  ?= 0
-APP_TEST_STAMP := ./mtkernel_3/app_program/.buddy_test_$(BUDDY_TEST)_$(DEBUG_MON)
+# Bench tests (BUDDY_TEST=3 Buddy 3 alone, 23 Buddy 2 + 3; 0 is the mission),
+# the USB console monitor for the mission (DEBUG_MON=1), and BENCH_NO_IMU=1,
+# which lets the mission start with a dead IMU (bench use only).
+# The stamp file name carries the values, and the recipe deletes the other
+# stamps, so the files that read them are rebuilt whenever a value changes.
+BUDDY_TEST   ?= 0
+DEBUG_MON    ?= 0
+BENCH_NO_IMU ?= 0
+APP_TEST_STAMP := ./mtkernel_3/app_program/.buddy_test_$(BUDDY_TEST)_$(DEBUG_MON)_$(BENCH_NO_IMU)
 
 $(APP_TEST_STAMP):
 	@mkdir -p "$(@D)"
@@ -60,6 +63,7 @@ $(APP_TEST_STAMP):
 	@touch "$@"
 
 ./mtkernel_3/app_program/app_main.o: $(APP_TEST_STAMP)
+./mtkernel_3/app_program/integration/vehicle.o: $(APP_TEST_STAMP)
 
 ################################################################################
 # Pico SDK subset used by the hardware modules
@@ -81,10 +85,10 @@ ifneq ($(SMP),0)
 $(error The AAI03 robot application is single-core: build with SMP=0)
 endif
 
-endif
-
 ifeq ($(wildcard $(PICO_SDK_PATH)/src/rp2_common/hardware_gpio/gpio.c),)
 $(error The robot application needs the Pico SDK.  Set PICO_SDK_PATH)
+endif
+
 endif
 
 APP_SDK_MODULES := common/pico_base_headers common/hardware_claim \
@@ -152,15 +156,18 @@ endif
 # Rules
 ################################################################################
 
-$(APP_KNL_OBJS): ./mtkernel_3/app_program/%.o: ../app_program/%.c $(APP_LINT_STAMP)
+# The scan stamp is order-only: it must exist before any object is built,
+# but refreshing it (which any source edit does) must not rebuild them all.
+$(APP_KNL_OBJS): ./mtkernel_3/app_program/%.o: ../app_program/%.c | $(APP_LINT_STAMP)
 	@echo 'Building kernel-side module: $<'
 	@mkdir -p "$(@D)"
 	$(GCC) $(CFLAGS) -std=c99 -pedantic $(APP_WARNINGS) \
 	    -D$(TARGET) -DBUDDY_TEST=$(BUDDY_TEST) -DDEBUG_MON=$(DEBUG_MON) \
+	    -DBENCH_NO_IMU=$(BENCH_NO_IMU) \
 	    $(APP_KERNEL_INCLUDES) $(APP_INCLUDES) \
 	    -MF"$(@:%.o=%.d)" -MT"$(@)" -c -o "$@" "$<"
 
-$(APP_HW_OBJS): ./mtkernel_3/app_program/%.o: ../app_program/%.c $(APP_LINT_STAMP)
+$(APP_HW_OBJS): ./mtkernel_3/app_program/%.o: ../app_program/%.c | $(APP_LINT_STAMP)
 	@echo 'Building hardware module: $<'
 	@mkdir -p "$(@D)"
 	$(GCC) $(CFLAGS) -std=gnu11 $(APP_WARNINGS) $(APP_SDK_DEFINES) \
