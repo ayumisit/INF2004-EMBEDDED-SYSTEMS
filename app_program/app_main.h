@@ -31,6 +31,7 @@
 #define APP_MAIN_FAIL_GPIO_IRQ      0x0200u
 #define APP_MAIN_FAIL_TICK          0x0400u
 #define APP_MAIN_FAIL_TEST          0x0800u
+#define APP_MAIN_FAIL_BUZZER        0x1000u
 
 INT      usermain(void);
 uint32_t app_main_boot_failures(void);
