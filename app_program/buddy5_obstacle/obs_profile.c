@@ -12,9 +12,14 @@
 #include "robot_cfg.h"
 #include "bitpack.h"
 #include "fix_math.h"
+#include "tune.h"
 #include "obs_profile.h"
 
-#define OBSTACLE_DEPTH_MM       150
+// 2026-11-17 (build 8): 150 to 80.  The course obstacle is at most 200 mm
+// wide, so its edges are at most about 50 mm further than its closest
+// point; 150 let echoes from things behind it join the obstacle (widths up
+// to 430 mm were measured).
+#define OBSTACLE_DEPTH_MM       80
 #define BYPASS_DEPTH_MM         400
 #define MDEG_PER_DEG            1000
 #define MM_PER_CM               10u
@@ -53,6 +58,8 @@ typedef struct
 } extent_t;
 
 static position_t         to_position(obs_profile_point_t const * p_point);
+static obs_profile_point_t beam_corrected(obs_profile_point_t const * p_point,
+                                          uint32_t centre_deg);
 static uint32_t           sort_by_angle(obs_profile_point_t const * p_points,
                                         uint32_t count,
                                         obs_profile_point_t * p_sorted);
@@ -99,15 +106,23 @@ obs_profile_compute (obs_profile_point_t const * p_points, uint32_t count,
     }
     else if (p_profile->b_valid)
     {
-        int32_t const left  = side_clearance(sorted, used, &extent, true);
-        int32_t const right = side_clearance(sorted, used, &extent, false);
+        int32_t const  left  = side_clearance(sorted, used, &extent, true);
+        int32_t const  right = side_clearance(sorted, used, &extent, false);
+
+        // Cast: left_x_mm >= right_x_mm and both are below 2^16, so exact.
+        uint32_t const width = (uint32_t) (extent.left_x_mm -
+                                           extent.right_x_mm);
 
         // Every value below is non-negative and below 2^16, so each
         // conversion to unsigned is exact.
         p_profile->distance_mm    = sorted[extent.closest].distance_mm;
         p_profile->angle_deg      = sorted[extent.closest].angle_deg;
-        p_profile->width_mm       = (uint32_t) (extent.left_x_mm -  // >= 0.
-                                                extent.right_x_mm);
+
+        // Never wider than the course allows (OBSTACLE_MAX_WIDTH_MM): a
+        // wider reading is sonar spread, and would swing the bypass out
+        // onto a neighbouring line.
+        p_profile->width_mm       = (width < OBSTACLE_MAX_WIDTH_MM) ?
+                                    width : OBSTACLE_MAX_WIDTH_MM;
         p_profile->left_clear_mm  = (uint32_t) left;    // 0..1000.
         p_profile->right_clear_mm = (uint32_t) right;   // 0..1000.
         p_profile->plan           = plan_route(&extent, left, right);
@@ -297,7 +312,8 @@ belongs (obs_profile_point_t const * p_point, uint32_t closest_mm)
  * @par
  * The obstacle is the run of neighbouring samples, in angle order, that
  * continue its surface.  A gap (no echo, or a much longer range) ends the
- * run, so a wall beside the obstacle is not mistaken for part of it.
+ * run, so a wall beside the obstacle is not mistaken for part of it.  Stray
+ * single echoes are already removed by the median of SCAN_PINGS pings.
  */
 static bool
 find_extent (obs_profile_point_t const * p_points, uint32_t count,
@@ -343,7 +359,10 @@ find_extent (obs_profile_point_t const * p_points, uint32_t count,
         for (uint32_t idx = p_extent->run_low; idx <= p_extent->run_high;
              idx++)
         {
-            position_t const pos = to_position(&p_points[idx]);
+            obs_profile_point_t const point =
+                beam_corrected(&p_points[idx],
+                               p_points[p_extent->closest].angle_deg);
+            position_t const          pos   = to_position(&point);
 
             p_extent->left_x_mm  = (pos.x_mm > p_extent->left_x_mm) ?
                                    pos.x_mm : p_extent->left_x_mm;
@@ -353,6 +372,37 @@ find_extent (obs_profile_point_t const * p_points, uint32_t count,
     }
 
     return (b_found);
+}
+
+
+/*!
+ * @brief A scan point moved to where its echo most likely came from.
+ *
+ * @param[in] p_point       Scan point on the obstacle.
+ * @param[in] centre_deg    Servo angle of the obstacle's closest point.
+ *
+ * @return The point, its angle moved up to TUNE_OBS_BEAM_DEG towards
+ *         centre_deg and never past it.
+ *
+ * @par
+ * The sonar beam is a cone, so it still hears the obstacle's edge after
+ * the servo has turned past it.  Without this correction each edge, and so
+ * the width, was placed too far out (OBS_BEAM_HALF_DEG).
+ */
+static obs_profile_point_t
+beam_corrected (obs_profile_point_t const * p_point, uint32_t centre_deg)
+{
+    // Angles are at most 180 and the tuned beam 0..20, so every cast is
+    // exact and the corrected angle stays within 0..180.
+    int32_t const       beam   = tune_get(TUNE_OBS_BEAM_DEG);
+    int32_t const       angle  = (int32_t) p_point->angle_deg;
+    int32_t const       centre = (int32_t) centre_deg;
+    int32_t const       shift  = fix_math_clamp(centre - angle, -beam, beam);
+    obs_profile_point_t moved  = *p_point;
+
+    moved.angle_deg = (uint32_t) (angle + shift);  // 0..180: exact.
+
+    return (moved);
 }
 
 

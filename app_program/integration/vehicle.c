@@ -27,6 +27,7 @@
 #include "telemetry.h"
 #include "tlm_codec.h"
 #include "motion.h"
+#include "encoder.h"
 #include "line_follow.h"
 #include "barcode.h"
 #include "obstacle.h"
@@ -36,6 +37,7 @@
 
 #define WAIT_MS                 50
 #define US_PER_MS               1000u
+#define FOLLOW_SLOW_MS          600u    // Slow start after every turn.
 #define MAX_STEPS               8u
 #define CALIB_SWEEP_DEG         25
 #define SWEEP_UNIT_DEG          30
@@ -44,10 +46,12 @@
 #define TURN_180_DEG            180
 #define CROSS_JUNCTION_MM       100
 #define BYPASS_ANGLE_DEG        45
-#define APPROACH_STEP           4u
+// Bypass step indices: 0 back up, 1 turn out, 2 out leg, 3 turn parallel,
+// 4 pass leg, 5 turn in, 6 approach leg.
+#define PASS_STEP               4u
+#define APPROACH_LEG_STEP       6u
 #define SQRT2_MILLI             1414
 #define MILLI                   1000
-#define APPROACH_FACTOR_MILLI   1500
 #define MIN_PASS_MM             100
 #define STATE_EVT_WIDTH         4u
 #define MAP_ACK_LETTER_WIDTH    5u
@@ -61,12 +65,36 @@
 #define DEPTH_EST_MM            ((int32_t) OBSTACLE_DEPTH_EST_MM)
 #define LENGTH_MM               ((int32_t) VEHICLE_LENGTH_MM)
 #define JUNCTION_ADVANCE        ((int32_t) JUNCTION_ADVANCE_MM)
+#define BACKUP_MM               ((int32_t) BYPASS_BACKUP_MM)
+#define MIN_LATERAL_MM          ((int32_t) BYPASS_LATERAL_MM)
+#define LATERAL_PERCENT         ((int32_t) BYPASS_LATERAL_PERCENT)
+#define REJOIN_GUARD_PERCENT    ((int32_t) BYPASS_REJOIN_GUARD_PERCENT)
+#define PERCENT                 100
+#define APPROACH_MAX_MM         ((int32_t) BYPASS_APPROACH_MAX_MM)
+#define CENTRE_MM               ((int32_t) BYPASS_CENTRE_MM)
 #define FATAL_FAULTS            (ROBOT_FAULT_MOTOR_STALL |                 \
                                  ROBOT_FAULT_ENCODER |                     \
                                  ROBOT_FAULT_NO_ECHO |                     \
                                  ROBOT_FAULT_IR_CALIB)
-#define SAFETY_EVENTS           (ROBOT_EVT_IMPACT | ROBOT_EVT_STALL | \
-                                 ROBOT_EVT_ECHO_FAULT)
+// Collision detection was descoped (2026-11-16): an impact is still counted
+// and reported by the IMU task, but it no longer stops the run.
+#define SAFETY_EVENTS           (ROBOT_EVT_STALL | ROBOT_EVT_ECHO_FAULT | \
+                                 ROBOT_EVT_LIFTED)
+
+// Bench build only (make ... BENCH_NO_IMU=1): start without a working IMU so
+// the other subsystems can be tested.  The IMU fault stays raised and is
+// still reported over USB and MQTT; only the start-up check ignores it.
+// Hump height and impact detection do not work in this build.  Never use it
+// for the mission.
+#ifndef BENCH_NO_IMU
+#define BENCH_NO_IMU            0
+#endif
+
+#if BENCH_NO_IMU
+#define START_FAULTS            0u
+#else
+#define START_FAULTS            ROBOT_FAULT_IMU
+#endif
 
 /*!
  * @brief Kinds of manoeuvre step.
@@ -77,6 +105,16 @@ typedef enum
     STEP_BACKWARD,
     STEP_TURN
 } step_kind_t;
+
+/*!
+ * @brief Stages of the bypass.
+ */
+typedef enum
+{
+    BYPASS_DETOUR = 0,  // Around the obstacle, then towards the line.
+    BYPASS_CENTRING,    // Line met: drive on until the axle is over it.
+    BYPASS_REALIGN      // Turn back until the sensor meets the line.
+} bypass_phase_t;
 
 /*!
  * @brief One manoeuvre step: a distance in mm, or an angle in degrees
@@ -100,7 +138,12 @@ typedef struct
     uint32_t         step_index;
     bool             b_steps_running;
     bool             b_scan_requested;
-    bool             b_realigning;
+    bool             b_follow_slow;     // Still in the slow start of following.
+    bypass_phase_t   phase;
+    bool             b_searching;       // LINE_FOUND has been asked for.
+    bool             b_approaching;     // The approach leg has started.
+    int32_t          approach_from_mm;  // Odometer when it started.
+    int32_t          rejoin_guard_mm;   // Travel before a line counts.
     bool             b_button_down;
     bool             b_latched;
     nav_map_action_t latched;
@@ -125,12 +168,16 @@ static void dispatch(uint32_t events);
 static void on_line_following(uint32_t events);
 static void on_obstacle_scan(uint32_t events);
 static void on_bypass(uint32_t events, bool b_finished);
+static void bypass_blocked(void);
+static void bypass_detour(bool b_found, bool b_finished);
+static void bypass_centre(void);
+static void bypass_realign(void);
 static void on_reacquire(uint32_t events, bool b_finished);
 static void poll_button(void);
 static void check_timeouts(void);
 static void start_run(void);
 static void follow(void);
-static void begin_junction(void);
+static void begin_junction(bool b_at_junction);
 static void begin_reacquire(void);
 static void begin_bypass(void);
 static void begin_plan(void);
@@ -156,6 +203,8 @@ vehicle_start (void)
     g_ctx.b_latched       = false;
     g_ctx.latched         = NAV_ACTION_STRAIGHT;
     g_ctx.b_button_down   = false;
+    g_ctx.phase           = BYPASS_DETOUR;
+    g_ctx.b_searching     = false;
     g_ctx.junctions       = 0u;
     g_ctx.bypasses        = 0u;
     g_ctx.retries         = 0u;
@@ -255,7 +304,7 @@ is_running (void)
 
 
 /*!
- * @brief SAFE STOP on impact, stall, echo fault or a fatal fault.
+ * @brief SAFE STOP on stall, echo fault, a lift or a fatal fault.
  *
  * @param[in] events  Events received this cycle.
  */
@@ -354,6 +403,18 @@ apply_command (uint32_t word)
             telemetry_post_event(TELEMETRY_EVT_MAP_ACK, ack);
         break;
 
+        case TLM_CMD_SCAN:
+            // Profile the obstacle in front on request, for checking the
+            // width on the bench.  Only while stopped: during a run the
+            // scans belong to OBSTACLE SCAN.  The PROFILE event reports the
+            // result; the profile left in mbf_obs_profile is replaced by
+            // the next scan before OBSTACLE SCAN reads it.
+            if (!is_running())
+            {
+                obstacle_request_scan();
+            }
+        break;
+
         default:
             // Validated by Communication; nothing else can arrive.
         break;
@@ -403,7 +464,7 @@ dispatch (uint32_t events)
             if ((board_hw_time_us() - g_ctx.entered_us) >=
                 (INIT_SETTLE_MS * US_PER_MS))
             {
-                enter((0u != (robot_ipc_faults() & ROBOT_FAULT_IMU)) ?
+                enter((0u != (robot_ipc_faults() & START_FAULTS)) ?
                       VEHICLE_SAFE_STOP : VEHICLE_READY);
             }
         break;
@@ -423,6 +484,17 @@ dispatch (uint32_t events)
         break;
 
         case VEHICLE_LINE_FOLLOWING:
+            if ((g_ctx.b_follow_slow) &&
+                ((board_hw_time_us() - g_ctx.entered_us) >=
+                 (FOLLOW_SLOW_MS * US_PER_MS)))
+            {
+                // Settled on the edge: up to the full following speed.
+                // The tuned speed is 30..600, so the cast is exact.
+                g_ctx.b_follow_slow = false;
+                (void) motion_follow_line(
+                           (uint32_t) tune_get(TUNE_SPEED_FOLLOW));
+            }
+
             on_line_following(events);
         break;
 
@@ -481,11 +553,29 @@ on_line_following (uint32_t events)
     }
     else if (0u != (events & ROBOT_EVT_JUNCTION))
     {
-        begin_junction();
+        if (g_ctx.b_latched)
+        {
+            begin_junction(true);
+        }
+        else
+        {
+            // No barcode action saved: every turn on the track has a
+            // barcode before it, so this is a tight curve (the left sensor
+            // reaching the line), not a junction.  Keep following.
+            line_follow_clear_junction();
+        }
     }
     else if (0u != (events & ROBOT_EVT_LINE_LOST))
     {
-        begin_reacquire();
+        if ((g_ctx.b_latched) && (NAV_ACTION_UTURN == g_ctx.latched))
+        {
+            // The line ended with a U-turn saved: run it here.
+            begin_junction(false);
+        }
+        else
+        {
+            begin_reacquire();
+        }
     }
     else
     {
@@ -521,10 +611,17 @@ on_obstacle_scan (uint32_t events)
 
 
 /*!
- * @brief BYPASS: run the detour; on the approach leg, LINE_FOUND ends it.
+ * @brief BYPASS: run the detour, then rejoin the line in three stages.
  *
  * @param[in] events      Events received this cycle.
  * @param[in] b_finished  true if the step list has just finished.
+ *
+ * @par
+ * DETOUR ends on the approach leg, which drives towards the line until the
+ * centre sensor finds it.  CENTRING then drives on until the axle is over
+ * the line, and REALIGN turns back towards the old heading until the
+ * sensor meets the line again, so the robot ends up on the line and
+ * pointing along it whatever angle it arrived at.
  *
  * @par
  * LINE_LOST and JUNCTION are ignored here: leaving the line is intended,
@@ -533,33 +630,167 @@ on_obstacle_scan (uint32_t events)
 static void
 on_bypass (uint32_t events, bool b_finished)
 {
-    bool const b_found = (0u != (events & ROBOT_EVT_LINE_FOUND));
+    // A LINE_FOUND counts only after the search for it was requested, so a
+    // report left over from crossing another line is never used.
+    bool const b_found   = (g_ctx.b_searching) &&
+                           (0u != (events & ROBOT_EVT_LINE_FOUND));
 
-    if ((g_ctx.b_realigning) && b_finished)
+    // Only the pass and approach legs are checked: while backing up and on
+    // the way out, the obstacle being avoided is still in front.
+    bool const b_blocked = (0u != (events & ROBOT_EVT_OBSTACLE)) &&
+                           (BYPASS_DETOUR == g_ctx.phase) &&
+                           (g_ctx.step_index >= PASS_STEP) &&
+                           (STEP_FORWARD ==
+                            g_ctx.steps[g_ctx.step_index].kind);
+
+    if (b_blocked)
     {
+        bypass_blocked();
+    }
+    else if (BYPASS_DETOUR == g_ctx.phase)
+    {
+        bypass_detour(b_found, b_finished);
+    }
+    else if (BYPASS_CENTRING == g_ctx.phase)
+    {
+        if (b_finished)
+        {
+            bypass_realign();
+        }
+    }
+    else if (b_found)
+    {
+        // REALIGN met the line: back on it and pointing along it.
         g_ctx.bypasses++;
         follow();
     }
-    else if ((!g_ctx.b_realigning) && b_found &&
-             (g_ctx.step_index >= APPROACH_STEP))
+    else if (b_finished)
     {
-        // Back on the line at 45 degrees: turn to the original heading.
-        int32_t const angle     = (OBS_PLAN_PASS_LEFT == g_ctx.profile.plan) ?
-                                  BYPASS_ANGLE_DEG : -BYPASS_ANGLE_DEG;
-        step_t const  realign[] = { { STEP_TURN, angle } };
+        // REALIGN turned its full angle without meeting the line.
+        begin_reacquire();
+    }
+    else
+    {
+        // Still turning back towards the line.
+    }
+}
 
-        g_ctx.b_realigning = true;
-        run_steps(realign, 1u);
+
+/*!
+ * @brief BYPASS: something else is in the way of the detour.
+ *
+ * @par
+ * Stop and scan again from here, as many times as a reverse-and-retry
+ * allows.
+ */
+static void
+bypass_blocked (void)
+{
+    g_ctx.retries++;
+    g_ctx.b_steps_running = false;
+
+    if (g_ctx.retries > BYPASS_RETRIES_MAX)
+    {
+        enter(VEHICLE_SAFE_STOP);
+    }
+    else
+    {
+        g_ctx.b_scan_requested = false;
+        enter(VEHICLE_OBSTACLE_SCAN);
+        (void) motion_stop();  // Its MOVE_DONE starts the scan.
+    }
+}
+
+
+/*!
+ * @brief BYPASS, DETOUR stage: ask for the line on the approach leg.
+ *
+ * @param[in] b_found     true if the requested LINE_FOUND has arrived.
+ * @param[in] b_finished  true if the step list has just finished.
+ */
+static void
+bypass_detour (bool b_found, bool b_finished)
+{
+    if (b_found)
+    {
+        bypass_centre();
     }
     else if (b_finished)
     {
-        // The approach ended without finding the line: search for it.
+        // The approach leg reached its limit without finding the line.
         begin_reacquire();
+    }
+    else if ((!g_ctx.b_searching) &&
+             (g_ctx.step_index >= APPROACH_LEG_STEP))
+    {
+        encoder_state_t enc;
+
+        encoder_get_state(&enc);
+
+        if (!g_ctx.b_approaching)
+        {
+            // The approach leg has just started: note where.
+            g_ctx.b_approaching    = true;
+            g_ctx.approach_from_mm = enc.distance_mm;
+        }
+        else if ((enc.distance_mm - g_ctx.approach_from_mm) >=
+                 g_ctx.rejoin_guard_mm)
+        {
+            // Far enough back: from now on the next line under the centre
+            // sensor is the one being rejoined.
+            g_ctx.b_searching = true;
+            line_follow_begin_search();
+        }
+        else
+        {
+            // Still too far out: a line here is a neighbouring one.
+        }
     }
     else
     {
         // Detour in progress.
     }
+}
+
+
+/*!
+ * @brief BYPASS, CENTRING stage: the sensor is on the line, so drive on
+ *        until the axle (the turning centre) is over it.
+ *
+ * @par
+ * The new move replaces the approach leg without stopping.
+ */
+static void
+bypass_centre (void)
+{
+    step_t const centre[] = { { STEP_FORWARD, CENTRE_MM } };
+
+    g_ctx.phase       = BYPASS_CENTRING;
+    g_ctx.b_searching = false;
+    run_steps(centre, 1u);
+}
+
+
+/*!
+ * @brief BYPASS, REALIGN stage: turn back towards the original heading
+ *        until the centre sensor meets the line.
+ *
+ * @par
+ * The sensor is now past the line, so the turn swings it back onto the
+ * line exactly when the robot points along it.  The angle is only a limit.
+ */
+static void
+bypass_realign (void)
+{
+    int32_t const angle     = (OBS_PLAN_PASS_LEFT == g_ctx.profile.plan) ?
+                              BYPASS_REALIGN_MAX_DEG :
+                              -BYPASS_REALIGN_MAX_DEG;
+    step_t const  realign[] = { { STEP_TURN, angle } };
+
+    g_ctx.phase       = BYPASS_REALIGN;
+    g_ctx.b_searching = true;
+    line_follow_begin_search();
+    run_steps(realign, 1u);
 }
 
 
@@ -694,18 +925,30 @@ follow (void)
 {
     line_follow_clear_junction();
     enter(VEHICLE_LINE_FOLLOWING);
+    // Following begins at the slow speed, because the robot has just come
+    // out of a turn and may still be carrying rotation and a heading error;
+    // dispatch() raises it to the full speed after FOLLOW_SLOW_MS.
     // The 4-slot command queue cannot be full: this task issues at most two
     // commands per cycle and Motion Control drains the queue every 10 ms.
     // The tuned speed is 30..600, so the cast is exact.
-    (void) motion_follow_line((uint32_t) tune_get(TUNE_SPEED_FOLLOW));
+    g_ctx.b_follow_slow = true;
+    (void) motion_follow_line((uint32_t) tune_get(TUNE_SPEED_SLOW));
 }
 
 
 /*!
  * @brief JUNCTION ACTION: execute the latched action (straight if none).
+ *
+ * @param[in] b_at_junction  true at a junction; false where the line ended.
+ *
+ * @par
+ * Every turn, the U-turn included, is made on the spot after the axle has
+ * reached the junction centre.  Where the line simply ended there is no
+ * junction centre to drive to, so the saved U-turn is made where the robot
+ * stands.
  */
 static void
-begin_junction (void)
+begin_junction (bool b_at_junction)
 {
     nav_map_action_t const action = g_ctx.b_latched ? g_ctx.latched :
                                                       NAV_ACTION_STRAIGHT;
@@ -728,15 +971,19 @@ begin_junction (void)
         break;
 
         case NAV_ACTION_UTURN:
-            steps[0].kind   = STEP_TURN;
-            steps[0].amount = TURN_180_DEG;
-            count           = 1u;
+            steps[1].amount = TURN_180_DEG;
         break;
 
         default:
             steps[0].amount = CROSS_JUNCTION_MM;
             count           = 1u;
         break;
+    }
+
+    if ((NAV_ACTION_UTURN == action) && (!b_at_junction))
+    {
+        steps[0] = steps[1];
+        count    = 1u;
     }
 
     // The action enumeration is below 4, so the cast is exact.
@@ -753,15 +1000,19 @@ begin_junction (void)
 static void
 begin_reacquire (void)
 {
-    // Left 1, right 2, left 3, right 4, left 2 sweep units: the sweep ends
-    // on the heading it started from.
-    step_t const sweep[] =
+    // Start towards the side the line was last seen: the published offset
+    // is positive when it went right (positive turn = left).  Then 1, 2,
+    // 3, 4 and 2 sweep units alternating: the sweep ends on the heading it
+    // started from.
+    int32_t const side    = (line_follow_offset(line_follow_read()) > 0) ?
+                            -1 : 1;
+    step_t const  sweep[] =
     {
-        { STEP_TURN, SWEEP_UNIT_DEG },
-        { STEP_TURN, -2 * SWEEP_UNIT_DEG },
-        { STEP_TURN, 3 * SWEEP_UNIT_DEG },
-        { STEP_TURN, -4 * SWEEP_UNIT_DEG },
-        { STEP_TURN, 2 * SWEEP_UNIT_DEG }
+        { STEP_TURN, side * SWEEP_UNIT_DEG },
+        { STEP_TURN, -side * 2 * SWEEP_UNIT_DEG },
+        { STEP_TURN, side * 3 * SWEEP_UNIT_DEG },
+        { STEP_TURN, -side * 4 * SWEEP_UNIT_DEG },
+        { STEP_TURN, side * 2 * SWEEP_UNIT_DEG }
     };
 
     enter(VEHICLE_LINE_REACQUIRE);
@@ -811,8 +1062,12 @@ begin_plan (void)
 
 
 /*!
- * @brief BYPASS: leave the line at 45 degrees, pass the obstacle, and
- *        come back at 45 degrees until LINE_FOUND.
+ * @brief BYPASS: back away a little, leave the line at 45 degrees, pass
+ *        the obstacle, and come back at 45 degrees until LINE_FOUND.
+ *
+ * @par
+ * The approach leg has no planned length: it ends when the line is found
+ * (on_bypass), and APPROACH_MAX_MM only bounds a miss.
  */
 static void
 begin_bypass (void)
@@ -823,23 +1078,32 @@ begin_bypass (void)
     // Profile distances are at most 2550 mm (8-bit cm fields), so both
     // conversions to int32_t are exact.
     int32_t const width   = (int32_t) g_ctx.profile.width_mm;
-    int32_t const ahead   = (int32_t) g_ctx.profile.distance_mm;
-    int32_t const lateral = (width / 2) + HALF_VEHICLE_MM + MARGIN_MM;
+    int32_t const ahead   = (int32_t) g_ctx.profile.distance_mm + BACKUP_MM;
+    int32_t const needed  = (((width / 2) + HALF_VEHICLE_MM + MARGIN_MM) *
+                             LATERAL_PERCENT) / PERCENT;
+    int32_t const lateral = (needed > MIN_LATERAL_MM) ? needed :
+                                                        MIN_LATERAL_MM;
     int32_t const leg     = (lateral * SQRT2_MILLI) / MILLI;
     int32_t const pass    = fix_math_clamp(ahead + DEPTH_EST_MM +
                                            LENGTH_MM - lateral,
                                            MIN_PASS_MM, INT32_MAX);
     step_t const  detour[] =
     {
+        { STEP_BACKWARD, BACKUP_MM },
         { STEP_TURN, side * BYPASS_ANGLE_DEG },
         { STEP_FORWARD, leg },
         { STEP_TURN, -side * BYPASS_ANGLE_DEG },
         { STEP_FORWARD, pass },
         { STEP_TURN, -side * BYPASS_ANGLE_DEG },
-        { STEP_FORWARD, (leg * APPROACH_FACTOR_MILLI) / MILLI }
+        { STEP_FORWARD, APPROACH_MAX_MM }
     };
 
-    g_ctx.b_realigning = false;
+    // The way back to the line is as long as the way out.  A line met in
+    // the first part of it is not the one that was left.
+    g_ctx.rejoin_guard_mm = (leg * REJOIN_GUARD_PERCENT) / PERCENT;
+    g_ctx.b_approaching   = false;
+    g_ctx.phase           = BYPASS_DETOUR;
+    g_ctx.b_searching     = false;
     enter(VEHICLE_BYPASS);
     run_steps(detour, sizeof(detour) / sizeof(detour[0]));
 }

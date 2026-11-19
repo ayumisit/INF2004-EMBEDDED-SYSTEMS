@@ -70,3 +70,14 @@ Flash: hold BOOTSEL, plug in, copy the `.uf2` from `build_make` onto RPI-RP2.
 ---
 
 # About the micro T-Kernel RP2040 port
+
+
+
+## AAI03 robot application
+
+This fork runs the INF2004 AAI03 robot car (Buddies 1-5 plus vehicle
+integration) on the single-core micro T-Kernel build.  Start with
+[docs/AAI03_ROBOT.md](docs/AAI03_ROBOT.md) for wiring, build commands,
+tasks and the bring-up checklist.  Kernel port changes are listed in
+[docs/PORT_CHANGES.md](docs/PORT_CHANGES.md); Barr-C compliance in
+[docs/BARR_C_COMPLIANCE.md](docs/BARR_C_COMPLIANCE.md).

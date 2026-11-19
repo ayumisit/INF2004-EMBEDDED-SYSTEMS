@@ -36,14 +36,17 @@
 #include "obstacle.h"
 #include "vehicle.h"
 #include "motor_hw.h"
+#include "buzzer.h"
 #include "buddy2_test.h"
 #include "buddy3_test.h"
 #include "buddy23_test.h"
+#include "buddy4_test.h"
 #include "debug_mon.h"
 #include "app_main.h"
 
 // Bench test to build: 0 is the full mission, 2 is Buddy 2 alone, 3 is
-// Buddy 3 alone, 23 is Buddy 2 + Buddy 3 line following.
+// Buddy 3 alone, 4 is the Buddy 4 IMU diagnostic, 23 is Buddy 2 + Buddy 3
+// line following.
 // Set from the command line, for example make ... BUDDY_TEST=3.
 #ifndef BUDDY_TEST
 #define BUDDY_TEST              0
@@ -61,6 +64,8 @@ static void note(int32_t result, uint32_t failure_bit);
 static void start_buddy2_test(void);
 #elif (3 == BUDDY_TEST)
 static void start_buddy3_test(void);
+#elif (4 == BUDDY_TEST)
+static void start_buddy4_test(void);
 #elif (23 == BUDDY_TEST)
 static void start_buddy23_test(void);
 #else
@@ -78,10 +83,13 @@ usermain (void)
 {
     board_hw_init();
     note(robot_ipc_create(), APP_MAIN_FAIL_IPC);
+    note(buzzer_start(), APP_MAIN_FAIL_BUZZER);  // Every build: event cues.
 #if (2 == BUDDY_TEST)
     start_buddy2_test();
 #elif (3 == BUDDY_TEST)
     start_buddy3_test();
+#elif (4 == BUDDY_TEST)
+    start_buddy4_test();
 #elif (23 == BUDDY_TEST)
     start_buddy23_test();
 #else
@@ -137,6 +145,17 @@ start_buddy3_test (void)
     note(line_follow_start(), APP_MAIN_FAIL_LINE);
     note(barcode_start(), APP_MAIN_FAIL_BARCODE);
     note(buddy3_test_start(), APP_MAIN_FAIL_TEST);
+}
+#elif (4 == BUDDY_TEST)
+/*!
+ * @brief Start only the IMU diagnostic; the motors are held off and the
+ *        IMU Task does not run, so the diagnostic has the bus to itself.
+ */
+static void
+start_buddy4_test (void)
+{
+    motor_hw_init();  // Drives the motor pins to coast, so nothing moves.
+    note(buddy4_test_start(), APP_MAIN_FAIL_TEST);
 }
 #elif (23 == BUDDY_TEST)
 /*!

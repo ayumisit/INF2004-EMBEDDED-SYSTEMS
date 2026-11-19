@@ -20,6 +20,7 @@
 #include "sys_status.h"
 #include "bitpack.h"
 #include "telemetry.h"
+#include "motion.h"
 #include "servo_hw.h"
 #include "ultrasonic.h"
 #include "obs_profile.h"
@@ -62,13 +63,15 @@ static obstacle_ctx_t      g_ctx;
 static obs_profile_point_t g_points[OBS_PROFILE_MAX_POINTS];
 static uint64_t            g_stack[STACK_MEDIUM / sizeof(uint64_t)];
 
-static void obstacle_task(INT start_code, void * p_ext_info);
-static void monitor_once(void);
-static void run_scan(void);
-static void measure_at(uint32_t angle_deg, uint32_t settle_ms);
-static void note_result(ultrasonic_result_t result);
-static void send_profile(obs_profile_t const * p_profile);
-static void publish(void);
+static void     obstacle_task(INT start_code, void * p_ext_info);
+static void     monitor_once(void);
+static bool     is_turning_or_braking(void);
+static void     run_scan(void);
+static void     measure_at(uint32_t angle_deg, uint32_t settle_ms);
+static uint32_t middle_reading(uint32_t * p_readings, uint32_t count);
+static void     note_result(ultrasonic_result_t result);
+static void     send_profile(obs_profile_t const * p_profile);
+static void     publish(void);
 
 
 /*!
@@ -192,7 +195,15 @@ monitor_once (void)
 
     note_result(result);
 
-    if ((ULTRASONIC_OK == result) && (distance_mm < OBSTACLE_DETECT_MM))
+    if (is_turning_or_braking())
+    {
+        // The sensor sweeps past the floor and nearby objects while turning.
+        // Such readings are not obstacles on the path, so none may count.
+        // An obstacle already reported stays reported: clearing it here
+        // would make the same obstacle raise a second event after the stop.
+        g_ctx.near_count = 0u;
+    }
+    else if ((ULTRASONIC_OK == result) && (distance_mm < OBSTACLE_DETECT_MM))
     {
         g_ctx.front_cm = distance_mm / MM_PER_CM;
         g_ctx.near_count++;
@@ -232,6 +243,22 @@ monitor_once (void)
     {
         // Between the thresholds, or a sensor fault: keep the state.
     }
+}
+
+
+/*!
+ * @brief Report whether the robot is turning or stopping after a turn.
+ *
+ * @return true in MOTION_MODE_TURNING or MOTION_MODE_BRAKING.
+ */
+static bool
+is_turning_or_braking (void)
+{
+    uint32_t const mode = bitpack_word_get(sys_status_read(SYS_STATUS_MOTION),
+                                           MOTION_MODE_SHIFT,
+                                           MOTION_MODE_WIDTH);
+
+    return ((MOTION_MODE_TURNING == mode) || (MOTION_MODE_BRAKING == mode));
 }
 
 
@@ -300,28 +327,90 @@ run_scan (void)
  * @param[in] settle_ms  Settling time before measuring.
  *
  * @par
- * Sensor faults are left out of the scan so they never look like a clear
- * path (obs_profile.h).
+ * The sample is the middle of SCAN_PINGS readings, and has an echo only if
+ * at least SCAN_ECHOES_NEEDED pings returned one.  Sensor faults are left
+ * out of the scan so they never look like a clear path (obs_profile.h).
  */
 static void
 measure_at (uint32_t angle_deg, uint32_t settle_ms)
 {
-    uint32_t            distance_mm = 0u;
-    ultrasonic_result_t result      = ULTRASONIC_FAULT;
+    uint32_t readings[SCAN_PINGS];
+    uint32_t echoes = 0u;
+    uint32_t faults = 0u;
 
     servo_hw_set_angle(angle_deg);
     robot_ipc_sleep_ms(settle_ms);
-    result = ultrasonic_measure(&distance_mm);
-    note_result(result);
 
-    if ((ULTRASONIC_FAULT != result) &&
+    // Several pings per angle: one stray or missing echo must not end or
+    // stretch the obstacle (SCAN_PINGS).
+    for (uint32_t ping = 0u; ping < SCAN_PINGS; ping++)
+    {
+        uint32_t                  distance_mm = 0u;
+        ultrasonic_result_t const result      =
+            ultrasonic_measure(&distance_mm);
+
+        if (ULTRASONIC_OK == result)
+        {
+            readings[echoes] = distance_mm;
+            echoes++;
+        }
+        else if (ULTRASONIC_FAULT == result)
+        {
+            faults++;
+        }
+        else
+        {
+            // No echo: counts against the point having one.
+        }
+
+        robot_ipc_sleep_ms(SCAN_PING_GAP_MS);  // Let old echoes die away.
+    }
+
+    // One fault-count step per angle, as with a single ping: a sensor
+    // fault only when every ping failed (FAULT_LIMIT counts angles).
+    note_result((SCAN_PINGS == faults) ? ULTRASONIC_FAULT : ULTRASONIC_OK);
+
+    if ((faults < SCAN_PINGS) &&
         (g_ctx.point_count < OBS_PROFILE_MAX_POINTS))
     {
+        bool const b_echo = (echoes >= SCAN_ECHOES_NEEDED);
+
         g_points[g_ctx.point_count].angle_deg   = angle_deg;
-        g_points[g_ctx.point_count].distance_mm = distance_mm;
-        g_points[g_ctx.point_count].b_echo      = (ULTRASONIC_OK == result);
+        g_points[g_ctx.point_count].distance_mm =
+            b_echo ? middle_reading(readings, echoes) : SONAR_MAX_MM;
+        g_points[g_ctx.point_count].b_echo      = b_echo;
         g_ctx.point_count++;
     }
+}
+
+
+/*!
+ * @brief Middle value of a few readings (the closer one of two).
+ *
+ * @param[in,out] p_readings  Readings in mm; sorted in place.
+ * @param[in]     count       Number of readings, 1 to SCAN_PINGS.
+ *
+ * @return The median reading.
+ */
+static uint32_t
+middle_reading (uint32_t * p_readings, uint32_t count)
+{
+    // Insertion sort: at most SCAN_PINGS values.
+    for (uint32_t idx = 1u; idx < count; idx++)
+    {
+        uint32_t const item = p_readings[idx];
+        uint32_t       slot = idx;
+
+        while ((slot > 0u) && (p_readings[slot - 1u] > item))
+        {
+            p_readings[slot] = p_readings[slot - 1u];
+            slot--;
+        }
+
+        p_readings[slot] = item;
+    }
+
+    return (p_readings[(count - 1u) / 2u]);
 }
 
 
