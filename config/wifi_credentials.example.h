@@ -42,4 +42,6 @@
 #define UTK_WIFI_PASSWORD   "replace-with-password"
 #define UTK_WIFI_AUTH       CYW43_AUTH_WPA2_AES_PSK
 
+#define MQTT_BROKER_IP      "192.168.1.10"
+
 #endif /* WIFI_CREDENTIALS_H */
