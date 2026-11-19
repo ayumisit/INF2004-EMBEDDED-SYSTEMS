@@ -58,7 +58,8 @@ typedef enum
     TELEMETRY_EVT_JUNCTION,
     TELEMETRY_EVT_MAP_ACK,
     TELEMETRY_EVT_LINE,
-    TELEMETRY_EVT_TUNE
+    TELEMETRY_EVT_TUNE,
+    TELEMETRY_EVT_LIFT
 } telemetry_evt_t;
 
 int32_t  telemetry_start(void);
@@ -68,3 +69,4 @@ uint32_t telemetry_dropped_events(void);
 #endif /* TELEMETRY_H */
 
 /*** end of file ***/
+

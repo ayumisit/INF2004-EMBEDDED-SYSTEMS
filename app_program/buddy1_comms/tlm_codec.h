@@ -66,6 +66,7 @@ typedef enum
     TLM_TOPIC_EVENT,
     TLM_TOPIC_SUMMARY,
     TLM_TOPIC_ACK,
+    TLM_TOPIC_DEBUG,            // DIAGNOSTIC BUILD ONLY: raw record chunks.
     TLM_TOPIC_COUNT
 } tlm_codec_topic_t;
 
@@ -80,6 +81,7 @@ typedef enum
     TLM_CMD_SUMMARY,
     TLM_CMD_MAP_SET,
     TLM_CMD_TUNE,
+    TLM_CMD_SCAN,
     TLM_CMD_INVALID
 } tlm_codec_cmd_t;
 
@@ -115,3 +117,4 @@ tlm_codec_cmd_t tlm_codec_parse_command(uint8_t const * p_in,
 #endif /* TLM_CODEC_H */
 
 /*** end of file ***/
+

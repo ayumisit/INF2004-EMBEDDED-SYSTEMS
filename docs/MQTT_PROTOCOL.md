@@ -6,8 +6,9 @@ header byte: bits 3..0 are the frame type and bits 7..4 the protocol version
 (currently 1).  `tools/tlm_decode.py` decodes everything below and builds the
 commands; `make -C tests` checks it against the firmware's own encoder.
 
-Broker address, port and topic root are set in
-`app_program/platform/robot_cfg.h` (`MQTT_BROKER_IP`, `MQTT_BROKER_PORT`,
+The broker address (`MQTT_BROKER_IP`) is set in the local file
+`config/wifi_credentials.h`; see [MQTT_SETUP.md](MQTT_SETUP.md).  Port and topic
+root are in `app_program/platform/robot_cfg.h` (`MQTT_BROKER_PORT`,
 `MQTT_TOPIC_ROOT`, default `inf2004/aai03/`).  QoS 0, no retain, keep-alive
 10 s.
 
@@ -70,6 +71,7 @@ owners' headers and in `tools/tlm_decode.py`.
 | 9 | MAP_ACK | letter 5, action 2, map version 4, applied 1 |
 | 10 | LINE | 1 = line lost, 0 = line found |
 | 11 | TUNE | setting 4, new value 16 (excess-32768) |
+| 12 | LIFT | none: the robot was picked up and the motors were stopped |
 
 Fault mask bits: 0 motor stall, 1 encoder, 2 IMU, 3 no echo, 4 WiFi loss,
 5 IR calibration, 6 barcode FIFO overflow, 7 MQTT loss.
@@ -84,11 +86,18 @@ Fault mask bits: 0 motor stall, 1 encoder, 2 IMU, 3 no echo, 4 WiFi loss,
 | `summary` | `18 03` | Publish a SUMMARY frame |
 | `map` | `18 v4 xx` | Set the action of one barcode letter (FR10) |
 | `tune` | `18 s5 lo hi` | Change a setting live (s = setting id, value signed 16-bit little-endian). Lost on reset |
+| `scan` | `18 06` | Profile the obstacle in front now (only while not on a run); the result is a PROFILE event |
 
 `map` layout: byte 1 is `0x04 | (version << 4)`; byte 2 is
 `letter | (action << 5)` with letter 0 = A .. 25 = Z and action 0 = left,
 1 = right, 2 = straight, 3 = U-turn.  Example: map C to right, version 3 is
 `18 34 22`.
+
+No letter is mapped at start-up (every letter goes straight); the map is
+always sent from the PC.  A `map` command with a version different from
+the robot's current one starts a new map: every letter goes back to
+straight first.  Send the four letters of one map with the same version
+(the dashboard's M key does this).
 
 Every command is acknowledged on `ack` when it is received (accepted 1, or 0
 if malformed).  A map update is acknowledged a second time, by the MAP_ACK
@@ -114,6 +123,9 @@ Changes are lost on reset: copy good values into `platform/robot_cfg.h`.
 | 7 | `enc_um_per_edge` | 500..30000 um | `ENC_UM_PER_EDGE` |
 | 8 | `track_mm` | 50..300 mm (turn angle) | `TRACK_WIDTH_MM` |
 | 9 | `reverse_mm` | 0..500 mm | `REVERSE_DISTANCE_MM` |
+| 10 | `turn_right_pct` | 50..150 % of the angle asked for | `TURN_RIGHT_PERCENT` |
+| 11 | `turn_left_pct` | 50..150 % of the angle asked for | `TURN_LEFT_PERCENT` |
+| 12 | `obs_beam_deg` | 0..20 deg (sonar beam correction of the width) | `OBS_BEAM_HALF_DEG` |
 
 ## Link recovery
 

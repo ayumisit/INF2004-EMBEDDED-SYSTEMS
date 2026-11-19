@@ -76,7 +76,8 @@ static char const * const gp_topics[TLM_TOPIC_COUNT] =
     MQTT_TOPIC_ROOT "hb",
     MQTT_TOPIC_ROOT "evt",
     MQTT_TOPIC_ROOT "sum",
-    MQTT_TOPIC_ROOT "ack"
+    MQTT_TOPIC_ROOT "ack",
+    MQTT_TOPIC_ROOT "dbg"
 };
 static char const         g_command_topic[] = MQTT_TOPIC_ROOT "cmd";
 static char const         g_will_msg[]      = { LWT_OFFLINE_FRAME, 0 };
@@ -301,7 +302,9 @@ enter_state (net_state_t state, uint32_t now_ms)
 static void
 lose_link (uint32_t now_ms)
 {
-    if ((NULL != gp_client) && (0u != mqtt_client_is_connected(gp_client)))
+    // Also needed for an attempt still connecting, or the next connect fails
+    // with ERR_ISCONN.  lwIP ignores this call on an idle client.
+    if (NULL != gp_client)
     {
         mqtt_disconnect(gp_client);
     }
@@ -512,3 +515,4 @@ comms_net_start (void)
 #endif  /* TM_WIFI_MQTT */
 
 /*** end of file ***/
+

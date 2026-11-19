@@ -298,6 +298,11 @@ command_type (uint32_t type, uint32_t letter, uint32_t length)
                                               TLM_CMD_INVALID;
         break;
 
+        case TLM_CMD_SCAN:
+            result = (COMMAND_BYTES == length) ? TLM_CMD_SCAN :
+                                                 TLM_CMD_INVALID;
+        break;
+
         default:
             result = TLM_CMD_INVALID;
         break;
@@ -346,3 +351,4 @@ finish_frame (bitpack_t const * p_pack)
 }
 
 /*** end of file ***/
+
