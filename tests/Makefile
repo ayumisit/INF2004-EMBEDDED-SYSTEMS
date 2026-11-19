@@ -13,6 +13,7 @@ SRCS    := test_main.c \
            $(APP)/buddy2_motion/pid_ctrl.c \
            $(APP)/buddy3_line/code39.c \
            $(APP)/buddy4_imu/hump.c \
+           $(APP)/buddy4_imu/lift.c \
            $(APP)/buddy5_obstacle/obs_profile.c \
            $(APP)/integration/nav_map.c
 

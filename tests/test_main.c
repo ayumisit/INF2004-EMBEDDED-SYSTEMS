@@ -18,6 +18,7 @@
 #include "fix_math.h"
 #include "code39.h"
 #include "hump.h"
+#include "lift.h"
 #include "obs_profile.h"
 #include "tlm_codec.h"
 #include "tune.h"
@@ -30,6 +31,7 @@
 #define WIDE_TICKS              120u
 #define FRAME_CHARS             3u
 #define LETTERS                 26u
+#define STRAY_ELEMENTS          3u
 
 static uint32_t g_checks   = 0u;
 static uint32_t g_failures = 0u;
@@ -40,8 +42,15 @@ static uint32_t build_frame(uint8_t data_symbol, uint32_t * p_widths);
 static void test_bitpack(void);
 static void test_fix_math(void);
 static void test_code39(void);
+static uint32_t run_hump(hump_t * p_hump, int32_t peak_mdeg,
+                         uint32_t ramp_steps, uint32_t hold_steps,
+                         uint32_t bad_step, uint32_t * p_height);
 static void test_hump(void);
+static uint32_t run_lift(lift_t * p_lift, int32_t tilt_mdeg, uint32_t count,
+                         bool b_valid);
+static void test_lift(void);
 static void test_obs_profile(void);
+static void test_obs_beam(void);
 static void test_tlm_codec(void);
 static void test_nav_map(void);
 static void test_pid(void);
@@ -61,7 +70,9 @@ main (void)
     test_fix_math();
     test_code39();
     test_hump();
+    test_lift();
     test_obs_profile();
+    test_obs_beam();
     test_tlm_codec();
     test_nav_map();
     test_pid();
@@ -268,72 +279,257 @@ test_code39 (void)
     (void) build_frame('1', widths);
     CHECK(CODE39_BAD_FRAME == code39_decode(widths, CODE39_FRAME_ELEMENTS,
                                             &symbol, &b_reversed));
+
+    // Stray edges around the frame (paper edges): every letter, both ways.
+    passed = 0u;
+
+    for (uint32_t letter = 0u; letter < LETTERS; letter++)
+    {
+        uint32_t padded[CODE39_FRAME_ELEMENTS + STRAY_ELEMENTS];
+
+        (void) build_frame((uint8_t) ('A' + letter), widths);
+        padded[0] = WIDE_TICKS * 5u;
+        padded[CODE39_FRAME_ELEMENTS + 1u] = WIDE_TICKS * 4u;
+        padded[CODE39_FRAME_ELEMENTS + 2u] = NARROW_TICKS * 7u;
+
+        for (uint32_t idx = 0u; idx < CODE39_FRAME_ELEMENTS; idx++)
+        {
+            padded[idx + 1u] = widths[idx];
+        }
+
+        if ((CODE39_OK == code39_decode(padded,
+                                        CODE39_FRAME_ELEMENTS + STRAY_ELEMENTS,
+                                        &symbol, &b_reversed)) &&
+            (('A' + letter) == symbol) && (!b_reversed))
+        {
+            passed++;
+        }
+
+        for (uint32_t idx = 0u; idx < CODE39_FRAME_ELEMENTS; idx++)
+        {
+            padded[idx + 1u] = widths[(CODE39_FRAME_ELEMENTS - 1u) - idx];
+        }
+
+        if ((CODE39_OK == code39_decode(padded,
+                                        CODE39_FRAME_ELEMENTS + STRAY_ELEMENTS,
+                                        &symbol, &b_reversed)) &&
+            (('A' + letter) == symbol) && b_reversed)
+        {
+            passed++;
+        }
+    }
+
+    CHECK((2u * LETTERS) == passed);
 }
 
 
 /*!
- * @brief hump: a 10-degree ramp up and down reports about 17 mm.
+ * @brief Feed one tilt profile (20 ms samples) to a fresh hump detector.
+ *
+ * @param[out] p_hump      Detector, left as the profile ends.
+ * @param[in]  peak_mdeg   Peak tilt of a triangular hump (0: none).
+ * @param[in]  ramp_steps  Samples up to the peak (and as many down).
+ * @param[in]  hold_steps  Samples at the peak.
+ * @param[in]  bad_step    Sample marked invalid (0: none).
+ * @param[out] p_height    Height of the last completed hump.
+ *
+ * @return Number of humps reported.
+ */
+static uint32_t
+run_hump (hump_t * p_hump, int32_t peak_mdeg, uint32_t ramp_steps,
+          uint32_t hold_steps, uint32_t bad_step, uint32_t * p_height)
+{
+    uint32_t const start   = 10u;
+    uint32_t const top     = start + ramp_steps;
+    uint32_t const down    = top + hold_steps;
+    uint32_t const end     = down + ramp_steps;
+    uint32_t       reports = 0u;
+
+    hump_init(p_hump, HUMP_ENTER_MDEG, HUMP_EXIT_MDEG, HUMP_HOLD_MS, 100u);
+
+    for (uint32_t step = 0u; step < (end + 20u); step++)
+    {
+        int32_t tilt = 0;
+
+        if ((step >= start) && (step < top))
+        {
+            // Casts: step counts are small, so the conversions are exact.
+            tilt = (peak_mdeg * (int32_t) (step - start + 1u)) /
+                   (int32_t) ramp_steps;
+        }
+        else if ((step >= top) && (step < down))
+        {
+            tilt = peak_mdeg;
+        }
+        else if ((step >= down) && (step < end))
+        {
+            // Casts: step counts are small, so the conversions are exact.
+            tilt = (peak_mdeg * (int32_t) (end - step - 1u)) /
+                   (int32_t) ramp_steps;
+        }
+        else
+        {
+            tilt = 0;
+        }
+
+        if (hump_update(p_hump, tilt, (0u == bad_step) || (step != bad_step),
+                        20u, p_height))
+        {
+            reports++;
+        }
+    }
+
+    return (reports);
+}
+
+
+/*!
+ * @brief hump: one-wheel humps from the combined tilt, height = lever x
+ *        sin(peak), never negative.
  */
 static void
 test_hump (void)
 {
     hump_t   hump;
-    int32_t  distance = 0;
-    uint32_t height   = 0u;
-    bool     b_done   = false;
+    uint32_t height = 0u;
+    bool     b_seen = false;
 
-    hump_init(&hump, HUMP_ENTER_MDEG, HUMP_EXIT_MDEG, HUMP_HOLD_MS);
-
-    // Level, then 100 mm climbing at 10 degrees, 100 mm descending, level.
-    for (uint32_t step = 0u; step < 60u; step++)
-    {
-        int32_t pitch = 0;
-
-        if ((step >= 10u) && (step < 30u))
-        {
-            pitch = 10000;
-        }
-        else if ((step >= 30u) && (step < 50u))
-        {
-            pitch = -10000;
-        }
-        else
-        {
-            pitch = 0;
-        }
-
-        distance += 5;
-
-        if (hump_update(&hump, pitch, distance, true, 20u, &height))
-        {
-            b_done = true;
-        }
-    }
-
-    CHECK(b_done);
-    CHECK(near((int32_t) height, 17, 2));
-    CHECK(near((int32_t) hump_max_mm(&hump), 17, 2));
+    // A 12-degree lean over 0.4 s up and 0.4 s down: 100 x sin(12) = 20 mm.
+    CHECK(1u == run_hump(&hump, 12000, 20u, 0u, 0u, &height));
+    CHECK(near((int32_t) height, 20, 1));
+    CHECK(near((int32_t) hump_max_mm(&hump), 20, 1));
     CHECK(1u == hump_count(&hump));
+    CHECK(HUMP_STATE_LEVEL == hump_state(&hump));
+
+    // A flat top (1 s at the peak) is still one hump of the same height.
+    CHECK(1u == run_hump(&hump, 12000, 20u, 50u, 0u, &height));
+    CHECK(near((int32_t) height, 20, 1));
+
+    // A negative input (the other wheel, or a flipped axis) is the same.
+    CHECK(1u == run_hump(&hump, -12000, 20u, 0u, 0u, &height));
+    CHECK(near((int32_t) height, 20, 1));
+
+    // Below the 5-degree threshold, or too brief: not a hump.
+    CHECK(0u == run_hump(&hump, 4000, 20u, 0u, 0u, &height));
+    CHECK(0u == run_hump(&hump, 8000, 1u, 2u, 0u, &height));
+    CHECK(0u == hump_max_mm(&hump));
 
     // An invalid sample in the middle abandons the hump.
-    hump_init(&hump, HUMP_ENTER_MDEG, HUMP_EXIT_MDEG, HUMP_HOLD_MS);
-    b_done = false;
+    CHECK(0u == run_hump(&hump, 12000, 20u, 0u, 30u, &height));
+    CHECK(0u == hump_max_mm(&hump));
 
-    for (uint32_t step = 0u; step < 60u; step++)
+    // Tilted for 6 s (stuck or carried; the limit is 50 hold times): not a
+    // hump.
+    CHECK(0u == run_hump(&hump, 12000, 5u, 300u, 0u, &height));
+
+    // CLIMBING while the lean grows, DESCENDING while it shrinks.
+    hump_init(&hump, HUMP_ENTER_MDEG, HUMP_EXIT_MDEG, HUMP_HOLD_MS, 100u);
+
+    for (int32_t tilt = 0; tilt <= 12000; tilt += 600)
     {
-        int32_t const pitch = ((step >= 10u) && (step < 30u)) ? 10000 :
-                              (((step >= 30u) && (step < 50u)) ? -10000 : 0);
+        (void) hump_update(&hump, tilt, true, 20u, &height);
+    }
 
-        distance += 5;
+    CHECK(HUMP_STATE_CLIMBING == hump_state(&hump));
 
-        if (hump_update(&hump, pitch, distance, (25u != step), 20u, &height))
+    for (int32_t tilt = 12000; tilt >= 6000; tilt -= 600)
+    {
+        (void) hump_update(&hump, tilt, true, 20u, &height);
+    }
+
+    CHECK(HUMP_STATE_DESCENDING == hump_state(&hump));
+
+    for (uint32_t step = 0u; step < 10u; step++)
+    {
+        b_seen = hump_update(&hump, 0, true, 20u, &height) || b_seen;
+    }
+
+    CHECK(b_seen);
+    CHECK(near((int32_t) height, 20, 1));
+}
+
+
+/*!
+ * @brief Feed constant samples (20 ms apart) to a lift detector.
+ *
+ * @param[in,out] p_lift     Detector, left as the samples end.
+ * @param[in]     tilt_mdeg  Lean of every sample.
+ * @param[in]     count      Number of samples.
+ * @param[in]     b_valid    Whether the samples are valid.
+ *
+ * @return Number of lifts reported.
+ */
+static uint32_t
+run_lift (lift_t * p_lift, int32_t tilt_mdeg, uint32_t count, bool b_valid)
+{
+    uint32_t lifts = 0u;
+
+    for (uint32_t i = 0u; i < count; i++)
+    {
+        if (lift_update(p_lift, tilt_mdeg, b_valid, 20u))
         {
-            b_done = true;
+            lifts++;
         }
     }
 
-    CHECK(!b_done);
-    CHECK(0u == hump_max_mm(&hump));
+    return (lifts);
+}
+
+
+/*!
+ * @brief lift: a held lean beyond the threshold is a lift; the floor, the
+ *        hump and the lean read in turns are not.
+ */
+static void
+test_lift (void)
+{
+    lift_t lift;
+
+    // Level driving, the course hump (7.7 degrees) for a long time and the
+    // lean read during turns and braking (17 degrees) are not lifts.
+    lift_init(&lift, LIFT_TILT_MDEG, LIFT_HOLD_MS);
+    CHECK(0u == run_lift(&lift, 0, 100u, true));
+    CHECK(0u == run_lift(&lift, 7700, 1000u, true));
+    CHECK(0u == run_lift(&lift, 17000, 1000u, true));
+    CHECK(!lift_is_lifted(&lift));
+
+    // A lean beyond the threshold is a lift once it has lasted the hold,
+    // and is reported once however long it lasts.
+    CHECK(0u == run_lift(&lift, 30000, 14u, true));
+    CHECK(1u == run_lift(&lift, 30000, 1u, true));
+    CHECK(lift_is_lifted(&lift));
+    CHECK(0u == run_lift(&lift, 30000, 500u, true));
+
+    // Level again re-arms it; the opposite lean counts the same.
+    CHECK(0u == run_lift(&lift, 0, 10u, true));
+    CHECK(!lift_is_lifted(&lift));
+    CHECK(1u == run_lift(&lift, -30000, 20u, true));
+
+    // A lean shorter than the hold (one jolt) is not a lift.
+    lift_init(&lift, LIFT_TILT_MDEG, LIFT_HOLD_MS);
+    CHECK(0u == run_lift(&lift, 40000, 3u, true));
+    CHECK(0u == run_lift(&lift, 0, 10u, true));
+
+    // Invalid samples never report and restart the hold time.
+    CHECK(0u == run_lift(&lift, 30000, 100u, false));
+    CHECK(0u == run_lift(&lift, 30000, 14u, true));
+    CHECK(0u == run_lift(&lift, 30000, 1u, false));
+    CHECK(0u == run_lift(&lift, 30000, 14u, true));
+    CHECK(1u == run_lift(&lift, 30000, 1u, true));
+
+    // Steady following: the course hump is still not a lift, but a lean
+    // too big for any hump (20 degrees) is, after the same hold.
+    lift_init(&lift, LIFT_TILT_MDEG, LIFT_HOLD_MS);
+    lift_set_tilt(&lift, LIFT_TILT_STEADY_MDEG);
+    CHECK(0u == run_lift(&lift, 7700, 1000u, true));
+    CHECK(0u == run_lift(&lift, 0, 10u, true));
+    CHECK(0u == run_lift(&lift, 20000, 14u, true));
+    CHECK(1u == run_lift(&lift, 20000, 1u, true));
+
+    // Back to the normal threshold (a turn): 20 degrees is not a lift.
+    lift_init(&lift, LIFT_TILT_MDEG, LIFT_HOLD_MS);
+    lift_set_tilt(&lift, LIFT_TILT_MDEG);
+    CHECK(0u == run_lift(&lift, 20000, 1000u, true));
 }
 
 
@@ -373,6 +569,9 @@ test_obs_profile (void)
         count++;
     }
 
+    // Ideal pencil-beam samples: no beam correction for these scenes
+    // (test_obs_beam covers it).  Cast: enumeration value, exact.
+    CHECK(tune_set((uint32_t) TUNE_OBS_BEAM_DEG, 0));
     obs_profile_compute(points, count, &profile);
     CHECK((OBS_PLAN_PASS_LEFT == profile.plan) ||
           (OBS_PLAN_PASS_RIGHT == profile.plan));
@@ -416,6 +615,61 @@ test_obs_profile (void)
 
 
 /*!
+ * @brief obs_profile: the sonar beam correction of the obstacle width.
+ *
+ * @par
+ * A real sonar beam (about 15 degrees each side) still hears a 100 mm box
+ * 250 mm ahead out to 65 and 115 degrees.  Uncorrected that reads about
+ * 210 mm; the default correction brings it near the true 100 mm.
+ */
+static void
+test_obs_beam (void)
+{
+    obs_profile_point_t spread[OBS_PROFILE_MAX_POINTS];
+    obs_profile_t       profile;
+    uint32_t            used = 0u;
+
+    for (uint32_t angle = 30u; angle <= 150u; angle += 5u)
+    {
+        bool const b_hit  = (angle >= 65u) && (angle <= 115u);
+        bool const b_face = (angle >= 80u) && (angle <= 100u);
+
+        spread[used].angle_deg   = angle;
+        spread[used].distance_mm = b_face ? 250u : (b_hit ? 255u : 1500u);
+        spread[used].b_echo      = b_hit;
+        used++;
+    }
+
+    // Casts: enumeration value and small constants, all exact.
+    CHECK(tune_set((uint32_t) TUNE_OBS_BEAM_DEG, 0));
+    // Uncorrected it reads about 215 mm, capped at OBSTACLE_MAX_WIDTH_MM.
+    obs_profile_compute(spread, used, &profile);
+    CHECK(OBSTACLE_MAX_WIDTH_MM == profile.width_mm);
+
+    // Casts: enumeration value and small constants, all exact.
+    CHECK(tune_set((uint32_t) TUNE_OBS_BEAM_DEG,
+                   (int32_t) OBS_BEAM_HALF_DEG));
+    obs_profile_compute(spread, used, &profile);
+    CHECK(near((int32_t) profile.width_mm, 100, 40));  // Cast: < 2^16.
+
+    // Something 90 mm behind the box, beside it (60 and 120 degrees), is
+    // not part of the obstacle (OBSTACLE_DEPTH_MM): the width is unchanged.
+    for (uint32_t idx = 0u; idx < used; idx++)
+    {
+        if ((60u == spread[idx].angle_deg) ||
+            (120u == spread[idx].angle_deg))
+        {
+            spread[idx].b_echo      = true;
+            spread[idx].distance_mm = 340u;
+        }
+    }
+
+    obs_profile_compute(spread, used, &profile);
+    CHECK(near((int32_t) profile.width_mm, 100, 40));  // Cast: < 2^16.
+}
+
+
+/*!
  * @brief tlm_codec: frame sizes and command validation.
  */
 static void
@@ -426,6 +680,7 @@ test_tlm_codec (void)
     uint32_t      word = 0u;
     tlm_codec_summary_t summary = { 17u, 2u, 5u, 1u, 1u, 1234u, 95u, 0u };
     uint8_t const start[]   = { 0x18u, 0x00u };
+    uint8_t const scan[]    = { 0x18u, 0x06u };
     uint8_t const map_set[] = { 0x18u, 0x34u, 0x22u };
     uint8_t const bad_ver[] = { 0x28u, 0x00u };
     uint8_t const bad_map[] = { 0x18u, 0x04u, 0x1Fu };
@@ -448,6 +703,8 @@ test_tlm_codec (void)
     CHECK(0u == tlm_codec_telemetry(0u, words, frame, 10u));
 
     CHECK(TLM_CMD_START == tlm_codec_parse_command(start, 2u, &word));
+    CHECK(TLM_CMD_SCAN == tlm_codec_parse_command(scan, 2u, &word));
+    CHECK(TLM_CMD_INVALID == tlm_codec_parse_command(scan, 1u, &word));
     CHECK(TLM_CMD_MAP_SET == tlm_codec_parse_command(map_set, 3u, &word));
     CHECK(2u == bitpack_word_get(word, TLM_CMD_LETTER_SHIFT,
                                  TLM_CMD_LETTER_WIDTH));
@@ -494,17 +751,34 @@ test_nav_map (void)
 {
     nav_map_t map;
 
+    // Nothing is hard-coded: every letter goes straight until mapped.
     nav_map_init(&map);
-    CHECK(NAV_ACTION_LEFT == nav_map_get(&map, 0u));
-    CHECK(NAV_ACTION_RIGHT == nav_map_get(&map, 1u));
-    CHECK(NAV_ACTION_STRAIGHT == nav_map_get(&map, 2u));
-    CHECK(NAV_ACTION_UTURN == nav_map_get(&map, 3u));
+    CHECK(NAV_ACTION_STRAIGHT == nav_map_get(&map, 0u));
+    CHECK(NAV_ACTION_STRAIGHT == nav_map_get(&map, 1u));
+    CHECK(NAV_ACTION_STRAIGHT == nav_map_get(&map, 3u));
     CHECK(NAV_ACTION_STRAIGHT == nav_map_get(&map, 25u));
-    CHECK(nav_map_set(&map, 25u, NAV_ACTION_UTURN, 7u));
-    CHECK(NAV_ACTION_UTURN == nav_map_get(&map, 25u));
-    CHECK(7u == nav_map_version(&map));
+    CHECK(0u == nav_map_version(&map));
+
+    // A map of four letters, one version, as sent over MQTT.
+    CHECK(nav_map_set(&map, 6u, NAV_ACTION_STRAIGHT, 1u));     // G.
+    CHECK(nav_map_set(&map, 10u, NAV_ACTION_UTURN, 1u));       // K.
+    CHECK(nav_map_set(&map, 16u, NAV_ACTION_LEFT, 1u));        // Q.
+    CHECK(nav_map_set(&map, 25u, NAV_ACTION_RIGHT, 1u));       // Z.
+    CHECK(NAV_ACTION_UTURN == nav_map_get(&map, 10u));
+    CHECK(NAV_ACTION_LEFT == nav_map_get(&map, 16u));
+    CHECK(NAV_ACTION_RIGHT == nav_map_get(&map, 25u));
+    CHECK(1u == nav_map_version(&map));
+
+    // A new version replaces the whole map: Q and Z no longer turn.
+    CHECK(nav_map_set(&map, 0u, NAV_ACTION_LEFT, 2u));         // A.
+    CHECK(NAV_ACTION_LEFT == nav_map_get(&map, 0u));
+    CHECK(NAV_ACTION_STRAIGHT == nav_map_get(&map, 16u));
+    CHECK(NAV_ACTION_STRAIGHT == nav_map_get(&map, 25u));
+    CHECK(2u == nav_map_version(&map));
+
+    // An invalid letter changes nothing, not even the version.
     CHECK(!nav_map_set(&map, 26u, NAV_ACTION_LEFT, 8u));
-    CHECK(7u == nav_map_version(&map));
+    CHECK(2u == nav_map_version(&map));
     CHECK(NAV_ACTION_LEFT == nav_map_get(&map, 0u));
 }
 

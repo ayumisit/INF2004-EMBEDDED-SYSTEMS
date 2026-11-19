@@ -13,6 +13,11 @@
  * [15:8] highest hump mm (FR5 running maximum), [21:16] hump count.
  *
  * @par
+ * Lift detection: ROBOT_EVT_LIFTED is raised on flg_vehicle_evt when the
+ * robot is picked up (lift.h).  The lift count is read through a function
+ * because the telemetry status word is full.
+ *
+ * @par
  * COPYRIGHT NOTICE: (c) 2026 AAI03 team, INF2004.  All rights reserved.
  */
 
@@ -53,7 +58,8 @@ typedef enum
     IMU_CLASS_IMPACT
 } imu_class_t;
 
-int32_t imu_start(void);
+int32_t  imu_start(void);
+uint32_t imu_lift_count(void);
 
 #endif /* IMU_H */
 
