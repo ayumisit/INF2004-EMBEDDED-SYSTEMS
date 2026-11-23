@@ -70,7 +70,7 @@ export PICO_SDK_PATH=$HOME/pico/pico-sdk
 Add that to your shell profile to make it permanent, or pass it per build:
 
 ```sh
-make SMP=1 CONSOLE=usb_cdc PICO_SDK_PATH=$HOME/pico/pico-sdk -j8
+make SMP=0 CONSOLE=usb_cdc PICO_SDK_PATH=$HOME/pico/pico-sdk -j8
 ```
 
 > [!WARNING]
@@ -144,6 +144,15 @@ if your host compiler is not `g++`.
 **The build is single core by default.** `SMP` is the only switch that decides
 how many RP2040 cores the kernel uses.
 
+> [!IMPORTANT]
+> The robot application in `app_program/` builds **only** with
+> `SMP=0 CONSOLE=usb_cdc`; the makefile stops with an error for any other
+> combination (the application's shared-data rules are proven for one core,
+> and GP0/GP1 carry the IMU's I2C bus, so there is no UART console). The
+> other profiles in this section describe the bare kernel port and are kept
+> for reference. The robot's build commands are in the
+> [README](../README.md) and [MQTT_SETUP.md](MQTT_SETUP.md).
+
 ### Single core (default)
 
 ```sh
@@ -170,9 +179,11 @@ affinity. Qualified at 58/58.
 ### Console choice, independent of core count
 
 ```sh
-make SMP=1 -j8                  # UART0 console (default): GP0 TX, GP1 RX, 115200 8N1
-make SMP=1 CONSOLE=usb_cdc -j8  # console over the Pico's own USB port
+make SMP=0 -j8                  # UART0 console (default): GP0 TX, GP1 RX, 115200 8N1
+make SMP=0 CONSOLE=usb_cdc -j8  # console over the Pico's own USB port
 ```
+
+The robot application accepts only the second form: its IMU uses GP0/GP1.
 
 The UART console has no external dependencies. **`CONSOLE=usb_cdc` links
 TinyUSB from the Pico SDK** - see [step 1b](#1b-pico-sdk---only-if-you-want-usb-cdc-or-wi-fi)
@@ -181,10 +192,10 @@ for installing it and setting `PICO_SDK_PATH`.
 ### Radio (development profile, not in the qualified release)
 
 Also needs the Pico SDK - see [step 1b](#1b-pico-sdk---only-if-you-want-usb-cdc-or-wi-fi).
-`WIFI=cyw43` currently requires `SMP=1`.
+The robot builds its radio with `SMP=0`:
 
 ```sh
-make SMP=1 WIFI=cyw43 -j8
+make SMP=0 CONSOLE=usb_cdc WIFI=cyw43 WIFI_JOIN=1 WIFI_NETIF=1 WIFI_DHCP=1 MQTT=1 -j8
 ```
 
 ### Artifact naming

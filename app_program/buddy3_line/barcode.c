@@ -14,7 +14,7 @@
  * The quiet zone that ends a capture is adaptive: at least BARCODE_QUIET_MS
  * and at least four times the widest element seen so far.  A Code 39 quiet
  * zone is at least ten narrow elements wide while a wide element is at most
- * three, so this never splits a barcode, at any constant speed.
+ * three, so this does not split a barcode above about 45 mm/s.
  *
  * @par
  * COPYRIGHT NOTICE: (c) 2026 AAI03 team, INF2004.  All rights reserved.
@@ -24,23 +24,35 @@
 #include <stdbool.h>
 #include <tk/tkernel.h>
 
+#ifndef DEBUG_MON
+#define DEBUG_MON               0
+#endif
+#if (1 == DEBUG_MON)
+#include <tm/tmonitor.h>
+#endif
+
 #include "robot_cfg.h"
+#include "board_hw.h"
 #include "gpio_irq.h"
+#include "ir_hw.h"
 #include "robot_ipc.h"
 #include "sys_status.h"
 #include "bitpack.h"
 #include "telemetry.h"
+#include "buzzer.h"
 #include "code39.h"
 #include "barcode.h"
 
 #define TICK_US                 16u
 #define ENTRY_BLACK_BIT         0x8000u
 #define ENTRY_WIDTH_MASK        0x7FFFu
-#define MAX_ELEMENTS            32u
+#define MAX_ELEMENTS            36u
+#define GLITCH_TICKS            ((BARCODE_GLITCH_MS * US_PER_MS) / TICK_US)
 #define QUIET_FACTOR            4u
 #define US_PER_MS               1000u
 #define LETTER_COUNT            26u
 #define FIRST_LETTER            0x41u     // ASCII code of the letter A.
+#define ADC_IRQ_LEVEL           2         // Below the GPIO edge interrupt.
 
 /*!
  * @brief One finished capture.
@@ -49,8 +61,8 @@ typedef struct
 {
     uint32_t    widths[MAX_ELEMENTS];
     uint32_t    count;
-    bool        b_started_on_bar;
     bool        b_overflow;
+    bool        b_early;        // Ended on a decode, not on a quiet zone.
 } capture_t;
 
 // Interrupt-to-task FIFO.  Head and overflow count: written by the ISR only.
@@ -61,6 +73,58 @@ static uint32_t volatile g_fifo_tail      = 0u;
 static uint32_t volatile g_overflow_count = 0u;
 static uint32_t          g_last_edge_us   = 0u;     // ISR only.
 
+#if !BARCODE_SENSOR_ANALOGUE
+static bool              gb_level_known   = false;  // ISR only.
+static bool              gb_last_black    = false;  // ISR only.
+#endif
+
+#if BARCODE_SENSOR_ANALOGUE
+#define BOX_LEN                 BARCODE_AVERAGE   // Running average length.
+
+/*!
+ * @brief Edge finder state (ADC interrupt only).
+ */
+typedef struct
+{
+    uint32_t    valley;        // Lowest darkness of the current white element.
+    uint32_t    peak_env;      // Highest darkness seen recently (decays).
+    uint32_t    bar_peak;      // Highest darkness of the current bar.
+    uint32_t    sample_idx;    // Samples seen so far (wraps; differences used).
+    uint32_t    bar_peak_idx;  // Sample index of the current bar's peak.
+    uint32_t    last_fall_idx; // Sample index of the last bar's end.
+    uint32_t    prev1;         // Previous raw darkness (median input).
+    uint32_t    prev2;         // The one before that.
+    uint32_t    box[BOX_LEN];  // Last median outputs (average input).
+    uint32_t    box_sum;
+    uint32_t    box_pos;
+    bool        b_black;
+    bool        b_started;
+} sampler_t;
+
+#define US_PER_SAMPLE           (US_PER_MS * 1000u / IR_SAMPLE_HZ)
+#define MIN_BAR_SAMPLES         ((BARCODE_MIN_BAR_MS * IR_SAMPLE_HZ) / 1000u)
+
+static sampler_t         g_sampler;
+static uint16_t          g_history[BARCODE_HISTORY];   // ISR only.
+
+// For the debug monitor: single aligned stores from the interrupt.
+static uint32_t volatile g_dbg_dark   = 0u;
+static uint32_t volatile g_dbg_white  = 0u;
+static uint32_t volatile g_dbg_black  = 0u;
+
+#if (1 == DEBUG_MON)
+// Bench aid: the last eight seconds of darkness readings, printed with each
+// capture so the waveform can be replayed on a PC.
+#define TRACE_SAMPLES           16384u
+#define TRACE_DECIMATE          4u
+#define TRACE_PER_LINE          32u
+#define TRACE_LINE_PAUSE_MS     25          // Lets the USB console drain.
+static uint16_t volatile g_trace[TRACE_SAMPLES];
+static uint32_t volatile g_trace_head   = 0u;   // ISR only.
+static bool volatile     gb_trace_frozen = false;  // Task: hold while printing.
+#endif
+#endif
+
 static ID                gh_task          = 0;
 static uint32_t          g_status         = 0u;     // Task only.
 static uint32_t          g_sequence       = 0u;     // Task only.
@@ -70,13 +134,30 @@ static uint64_t          g_stack[STACK_MEDIUM / sizeof(uint64_t)];
 
 static void     barcode_task(INT start_code, void * p_ext_info);
 static void     capture(capture_t * p_capture);
+static void     settle(void);
 static bool     drain(capture_t * p_capture, bool b_first);
 static void     report(uint8_t symbol, bool b_reversed);
 static void     reject(barcode_reject_t reason, uint32_t count);
+static void     remove_glitch(capture_t * p_capture);
 static void     set_state(barcode_state_t state);
 static barcode_reject_t to_reject(code39_result_t result);
+static void     push_edge(uint32_t time_us, bool b_black);
+#if (1 == DEBUG_MON)
+static void     dump_capture(capture_t const * p_capture);
+#if BARCODE_SENSOR_ANALOGUE
+static void     dump_trace(void);
+#endif
+#endif
+#if BARCODE_SENSOR_ANALOGUE
+static void     barcode_adc_isr(UINT int_number);
+static void     on_sample(uint32_t raw, uint32_t time_us);
+static void     end_bar(sampler_t * p_s, uint32_t mid, uint32_t time_us);
+static uint32_t median3(uint32_t a_val, uint32_t b_val, uint32_t c_val);
+static uint32_t filter_sample(sampler_t * p_s, uint32_t now);
+#else
 static void     barcode_edge_isr(uint32_t pin, uint32_t edges,
                                  uint32_t time_us, uint32_t levels);
+#endif
 
 
 /*!
@@ -95,13 +176,59 @@ barcode_start (void)
     gh_task = robot_ipc_start_task(barcode_task, PRIO_BARCODE, g_stack,
                                    sizeof(g_stack));
 
+#if BARCODE_SENSOR_ANALOGUE
+    {
+        // The ADC itself was started by ir_hw_init() (Line Following).
+        T_DINT const dint =
+        {
+            .intatr = TA_HLNG,
+            .inthdr = barcode_adc_isr
+        };
+
+        if ((gh_task <= 0) || (E_OK != tk_def_int(IR_HW_ADC_IRQ_NUM, &dint)))
+        {
+            result = -1;
+        }
+        else
+        {
+            EnableInt(IR_HW_ADC_IRQ_NUM, ADC_IRQ_LEVEL);
+        }
+    }
+#else
     if ((gh_task <= 0) ||
         (!gpio_irq_attach(PIN_IR_BARCODE_DO, barcode_edge_isr, true, true)))
     {
         result = -1;
     }
+#endif
 
     return (result);
+}
+
+
+/*!
+ * @brief Current analogue levels for the debug monitor.
+ *
+ * @param[out] p_dark   Latest reading as darkness (0 = brightest).
+ * @param[out] p_white  White level the edge finder is working from.
+ * @param[out] p_black  Black level the edge finder is working from.
+ *
+ * @par
+ * All zero with the digital sensor.
+ */
+void
+barcode_debug_levels (uint32_t * p_dark, uint32_t * p_white,
+                      uint32_t * p_black)
+{
+#if BARCODE_SENSOR_ANALOGUE
+    *p_dark  = g_dbg_dark;
+    *p_white = g_dbg_white;
+    *p_black = g_dbg_black;
+#else
+    *p_dark  = 0u;
+    *p_white = 0u;
+    *p_black = 0u;
+#endif
 }
 
 
@@ -143,15 +270,14 @@ barcode_task (INT start_code, void * p_ext_info)
         set_state(BARCODE_STATE_CAPTURING);
         capture(&cap);
 
+#if (1 == DEBUG_MON)
+        dump_capture(&cap);
+#endif
         set_state(BARCODE_STATE_DECODING);
 
         if (cap.b_overflow)
         {
             reject(BARCODE_REJECT_OVERFLOW, cap.count);
-        }
-        else if (!cap.b_started_on_bar)
-        {
-            reject(BARCODE_REJECT_START, cap.count);
         }
         else
         {
@@ -172,6 +298,12 @@ barcode_task (INT start_code, void * p_ext_info)
             }
         }
 
+        if (cap.b_early)
+        {
+            // The command is out; now let the rest of the label pass.
+            settle();
+        }
+
         // Discard wake-ups queued by edges that belonged to this capture.
         (void) tk_can_wup(TSK_SELF);  // The count itself is not needed.
     }
@@ -190,16 +322,27 @@ capture (capture_t * p_capture)
     bool           b_first         = true;
     bool           b_quiet         = false;
 
-    p_capture->count            = 0u;
-    p_capture->b_started_on_bar = false;
-    p_capture->b_overflow       = false;
+    p_capture->count      = 0u;
+    p_capture->b_overflow = false;
+    p_capture->b_early    = false;
 
     while (!b_quiet)
     {
-        uint32_t widest   = 0u;
-        uint32_t quiet_ms = BARCODE_QUIET_MS;
+        uint32_t widest     = 0u;
+        uint32_t quiet_ms   = BARCODE_QUIET_MS;
+        uint8_t  symbol     = 0u;
+        bool     b_reversed = false;
 
         b_first = drain(p_capture, b_first);
+
+        // A complete barcode ends the capture at once, so the command is
+        // latched well before the junction whatever follows the last bar.
+        if (CODE39_OK == code39_decode(p_capture->widths, p_capture->count,
+                                       &symbol, &b_reversed))
+        {
+            p_capture->b_early = true;
+            break;
+        }
 
         for (uint32_t idx = 0u; idx < p_capture->count; idx++)
         {
@@ -222,6 +365,33 @@ capture (capture_t * p_capture)
 
 
 /*!
+ * @brief Wait out the quiet zone after an early decode, discarding edges.
+ *
+ * @par
+ * A capture that ends on a decode leaves the trailing edges of the label
+ * (its last quiet zone and the edge of the paper) still to come.  Left
+ * alone they would start a new capture and be rejected as too short.  So
+ * the task stays here until BARCODE_QUIET_MS passes with no edge, dropping
+ * whatever arrives, before it returns to IDLE.
+ */
+static void
+settle (void)
+{
+    capture_t scratch;
+    bool      b_quiet = false;
+
+    while (!b_quiet)
+    {
+        // BARCODE_QUIET_MS is a small positive constant: the cast is exact.
+        b_quiet = (E_TMOUT == tk_slp_tsk((TMO) BARCODE_QUIET_MS));
+    }
+
+    scratch.count = 0u;
+    (void) drain(&scratch, true);  // Empties the FIFO; contents not needed.
+}
+
+
+/*!
  * @brief Move FIFO entries into the capture.
  *
  * @param[in,out] p_capture  Capture being built.
@@ -230,8 +400,8 @@ capture (capture_t * p_capture)
  * @return The updated "no entry taken yet" flag.
  *
  * @par
- * The first entry of a capture is the quiet zone before the first bar: it
- * is not stored, but the level after it must be black.
+ * The first entry of a capture is the surface before the first edge, so it
+ * is not stored.  code39_decode() finds the frame among the rest.
  */
 static bool
 drain (capture_t * p_capture, bool b_first)
@@ -245,13 +415,13 @@ drain (capture_t * p_capture, bool b_first)
 
         if (b_still_first)
         {
-            p_capture->b_started_on_bar = (0u != (entry & ENTRY_BLACK_BIT));
-            b_still_first               = false;
+            b_still_first = false;
         }
         else if (p_capture->count < MAX_ELEMENTS)
         {
             p_capture->widths[p_capture->count] = entry & ENTRY_WIDTH_MASK;
             p_capture->count++;
+            remove_glitch(p_capture);
         }
         else
         {
@@ -265,6 +435,41 @@ drain (capture_t * p_capture, bool b_first)
     g_fifo_tail = tail;
 
     return (b_still_first);
+}
+
+
+/*!
+ * @brief Remove a flicker element just completed by the newest element.
+ *
+ * @param[in,out] p_capture  Capture being built.
+ *
+ * @par
+ * A comparator output (digital mode) can flicker black-white-black at a
+ * blurred bar edge.  Such a flicker is an element shorter than
+ * BARCODE_GLITCH_MS between two elements of the other colour; it is merged
+ * with both neighbours into one element, so the bar or space it split is
+ * whole again.  A flicker before the first real element is dropped with the
+ * element after it, which still belongs to the leading quiet zone.
+ */
+static void
+remove_glitch (capture_t * p_capture)
+{
+    uint32_t const count = p_capture->count;
+
+    if ((count >= 3u) && (p_capture->widths[count - 2u] < GLITCH_TICKS))
+    {
+        p_capture->widths[count - 3u] += p_capture->widths[count - 2u] +
+                                         p_capture->widths[count - 1u];
+        p_capture->count               = count - 2u;
+    }
+    else if ((2u == count) && (p_capture->widths[0] < GLITCH_TICKS))
+    {
+        p_capture->count = 0u;
+    }
+    else
+    {
+        // No flicker to remove.
+    }
 }
 
 
@@ -297,6 +502,7 @@ report (uint8_t symbol, bool b_reversed)
                           ROBOT_IPC_POLL);  // Full buffer: newest dropped.
     robot_ipc_flag_set(ROBOT_IPC_FLAG_VEHICLE, ROBOT_EVT_NAV_CMD);
     telemetry_post_event(TELEMETRY_EVT_BARCODE, msg);
+    buzzer_play(BUZZER_CUE_BARCODE);  // One short high beep.
 
     // The low 8 bits of the status word repeat the message.
     g_status = bitpack_word_set(g_status, 0u, BARCODE_MSG_WIDTH, msg);
@@ -394,40 +600,107 @@ to_reject (code39_result_t result)
 }
 
 
+#if (1 == DEBUG_MON)
 /*!
- * @brief GPIO handler for the barcode sensor (interrupt context).
+ * @brief Print the element widths of a capture on the USB console.
  *
- * @param[in] pin      PIN_IR_BARCODE_DO.
- * @param[in] edges    GPIO_IRQ_EDGE_* bits.
- * @param[in] time_us  Interrupt entry time.
- * @param[in] levels   Pin levels at interrupt entry.
+ * @param[in] p_capture  The finished capture.
  *
  * @par
- * Stores one FIFO entry and wakes the task.  Two coalesced edges mean an
- * element was lost, which is recorded as an overflow so the capture is
- * rejected rather than decoded wrongly.
+ * Bench aid (DEBUG_MON=1 builds only).  Widths are in milliseconds and
+ * alternate bar, space, bar... when the capture began on a bar.
  */
 static void
-barcode_edge_isr (uint32_t pin, uint32_t edges, uint32_t time_us,
-                  uint32_t levels)
+dump_capture (capture_t const * p_capture)
 {
-    uint32_t const ticks   = (time_us - g_last_edge_us) / TICK_US;
-    uint32_t const level   = (levels >> pin) & 1u;
-    bool const     b_black = (IR_DO_BLACK_IS_HIGH == level);
-    uint32_t const next    = (g_fifo_head + 1u) % BARCODE_FIFO_SLOTS;
-    uint32_t       entry   = (ticks > ENTRY_WIDTH_MASK) ? ENTRY_WIDTH_MASK :
-                                                          ticks;
+    // (UB *): string literal to the monitor API's character type.
+    (void) tm_printf((UB *) "cap %lu elements%s:", p_capture->count,
+                     p_capture->b_early ? " (decoded)" : "");
+
+    for (uint32_t idx = 0u; idx < p_capture->count; idx++)
+    {
+        // (UB *): string literal to the monitor API's character type.
+        (void) tm_printf((UB *) " %lu",
+                         (p_capture->widths[idx] * TICK_US) / US_PER_MS);
+    }
+
+    // (UB *): string literal to the monitor API's character type.
+    (void) tm_printf((UB *) "\n");
+
+#if BARCODE_SENSOR_ANALOGUE
+    // 2026-11-11: every capture, to see whether the blurred bars of the
+    // new barcode sensor still leave ripples in the signal (was >= 10).
+    if (p_capture->count >= 1u)
+    {
+        dump_trace();
+    }
+#endif
+}
+
+
+#if BARCODE_SENSOR_ANALOGUE
+/*!
+ * @brief Print the darkness trace, oldest first, one sample in four.
+ */
+static void
+dump_trace (void)
+{
+    uint32_t idx = 0u;
+
+    gb_trace_frozen = true;       // The ISR stops writing; order is stable.
+    idx             = g_trace_head;  // Oldest sample.
+
+    // (UB *): string literal to the monitor API's character type.
+    (void) tm_printf((UB *) "trace %lu samples at %lu Hz:\n",
+                     TRACE_SAMPLES / TRACE_DECIMATE,
+                     IR_SAMPLE_HZ / TRACE_DECIMATE);
+
+    for (uint32_t num = 0u; num < (TRACE_SAMPLES / TRACE_DECIMATE); num++)
+    {
+        bool const b_line_end = (0u == ((num + 1u) % TRACE_PER_LINE));
+
+        // (UB *): string literal to the monitor API's character type.
+        (void) tm_printf((UB *) "%lu%s", (uint32_t) g_trace[idx],
+                         b_line_end ? "\n" : " ");
+        idx = (idx + TRACE_DECIMATE) % TRACE_SAMPLES;
+
+        if (b_line_end)
+        {
+            (void) tk_dly_tsk(TRACE_LINE_PAUSE_MS);  // Cannot fail here.
+        }
+    }
+
+    // (UB *): string literal to the monitor API's character type.
+    (void) tm_printf((UB *) "end trace\n");
+    gb_trace_frozen = false;
+}
+#endif
+#endif
+
+
+/*!
+ * @brief Record one black/white edge for the Barcode task.
+ *
+ * @param[in] time_us  Time of the edge.
+ * @param[in] b_black  true if the surface is black from this edge on.
+ *
+ * @par
+ * Interrupt context.  The entry holds the width of the element that has
+ * just ended, in TICK_US units, and the colour that starts now.
+ */
+static void
+push_edge (uint32_t time_us, bool b_black)
+{
+    uint32_t const ticks = (time_us - g_last_edge_us) / TICK_US;
+    uint32_t const next  = (g_fifo_head + 1u) % BARCODE_FIFO_SLOTS;
+    uint32_t       entry = (ticks > ENTRY_WIDTH_MASK) ? ENTRY_WIDTH_MASK :
+                                                        ticks;
 
     g_last_edge_us = time_us;
 
     if (b_black)
     {
         entry |= ENTRY_BLACK_BIT;
-    }
-
-    if ((GPIO_IRQ_EDGE_RISING | GPIO_IRQ_EDGE_FALLING) == edges)
-    {
-        g_overflow_count++;
     }
 
     if (next == g_fifo_tail)
@@ -442,6 +715,270 @@ barcode_edge_isr (uint32_t pin, uint32_t edges, uint32_t time_us,
 
     (void) tk_wup_tsk(gh_task);  // E_QOVR is benign: the task drains all.
 }
+
+
+#if BARCODE_SENSOR_ANALOGUE
+/*!
+ * @brief ADC interrupt: a pair of conversions is ready.
+ *
+ * @param[in] int_number  Unused: this handler serves one interrupt only.
+ */
+static void
+barcode_adc_isr (UINT int_number)
+{
+    uint32_t raw = 0u;
+
+    (void) int_number;  // Unused: this handler serves one interrupt only.
+
+    if (ir_hw_sampler_take(&raw))
+    {
+        on_sample(raw, board_hw_time_us());
+    }
+}
+
+
+/*!
+ * @brief Turn one barcode conversion into black/white edges.
+ *
+ * @param[in] raw      ADC reading.
+ * @param[in] time_us  Time of the reading.
+ *
+ * @par
+ * The reading is first turned into darkness, so black is always the high
+ * side.  The white level follows the lowest darkness of the current white
+ * element and the black level the highest darkness seen recently.  A bar is
+ * noticed when the darkness climbs 1/2^BARCODE_ENTER_SHIFT of that contrast
+ * above white and ends when it drops below BARCODE_SPLIT_PERCENT of the
+ * bar's own height.  Both edges are then recorded at that level, the start
+ * by looking back
+ * through the recent samples, so a bar narrower than the sensor's spot,
+ * which never reaches full black, is still measured at its true width and
+ * the spaces beside it are not stretched.  With no contrast (plain surface)
+ * no edges are produced at all.
+ */
+static void
+on_sample (uint32_t raw, uint32_t time_us)
+{
+    uint32_t const    now  = (0u != IR_AO_BLACK_IS_HIGH) ?
+                             raw : (IR_HW_ADC_MAX - raw);
+    sampler_t * const p_s  = &g_sampler;
+    uint32_t          dark = 0u;
+
+    if (!p_s->b_started)
+    {
+        p_s->valley        = now;
+        p_s->peak_env      = now;
+        p_s->bar_peak      = now;
+        p_s->sample_idx    = 0u;
+        p_s->bar_peak_idx  = 0u;
+        p_s->last_fall_idx = 0u;
+        p_s->prev1         = now;
+        p_s->prev2         = now;
+        p_s->box_sum       = BOX_LEN * now;
+        p_s->box_pos       = 0u;
+        p_s->b_black       = false;
+        p_s->b_started     = true;
+
+        for (uint32_t pos = 0u; pos < BOX_LEN; pos++)
+        {
+            p_s->box[pos] = now;
+        }
+    }
+
+    dark = filter_sample(p_s, now);
+
+    g_history[p_s->sample_idx % BARCODE_HISTORY] = (uint16_t) dark;  // 12 bits.
+
+    if (dark > p_s->peak_env)
+    {
+        p_s->peak_env = dark;
+    }
+    else
+    {
+        p_s->peak_env -= (p_s->peak_env - dark) >> BARCODE_DECAY_SHIFT;
+    }
+
+    if (p_s->b_black)
+    {
+        // The bar's height is at most 4095, so the product fits easily.
+        uint32_t const mid = p_s->valley +
+                             (((p_s->bar_peak - p_s->valley) *
+                               BARCODE_SPLIT_PERCENT) / 100u);
+
+        if (dark > p_s->bar_peak)
+        {
+            p_s->bar_peak     = dark;
+            p_s->bar_peak_idx = p_s->sample_idx;
+        }
+
+        if (dark < mid)
+        {
+            end_bar(p_s, mid, time_us);
+            p_s->valley = dark;
+        }
+    }
+    else
+    {
+        uint32_t span = 0u;
+
+        if (dark < p_s->valley)
+        {
+            p_s->valley = dark;
+        }
+        else
+        {
+            p_s->valley += (dark - p_s->valley) >> BARCODE_DECAY_SHIFT;
+        }
+
+        span = p_s->peak_env - p_s->valley;
+
+        if ((span >= BARCODE_MIN_SPAN) &&
+            (dark > (p_s->valley + (span >> BARCODE_ENTER_SHIFT))))
+        {
+            p_s->b_black      = true;
+            p_s->bar_peak     = dark;
+            p_s->bar_peak_idx = p_s->sample_idx;
+        }
+    }
+
+    p_s->sample_idx++;
+
+    g_dbg_dark  = dark;
+    g_dbg_white = p_s->valley;
+    g_dbg_black = p_s->peak_env;
+
+#if (1 == DEBUG_MON)
+    if (!gb_trace_frozen)
+    {
+        g_trace[g_trace_head] = (uint16_t) dark;  // 12-bit value: exact.
+        g_trace_head          = (g_trace_head + 1u) % TRACE_SAMPLES;
+    }
+#endif
+}
+
+
+/*!
+ * @brief Record both edges of a bar that has just ended.
+ *
+ * @param[in,out] p_s      Edge finder state.
+ * @param[in]     mid      Half-height level of the bar (darkness).
+ * @param[in]     time_us  Time of the sample that fell below it.
+ *
+ * @par
+ * The bar's start is where the darkness first climbed past the same level:
+ * walk back from the peak through the history, no further than the previous
+ * bar's end.
+ */
+static void
+end_bar (sampler_t * p_s, uint32_t mid, uint32_t time_us)
+{
+    uint32_t       back  = p_s->sample_idx - p_s->bar_peak_idx;
+    uint32_t const since = p_s->sample_idx - p_s->last_fall_idx;
+    uint32_t const limit = (since < (BARCODE_HISTORY - 1u)) ?
+                           since : (BARCODE_HISTORY - 1u);
+
+    while ((back < limit) &&
+           (g_history[(p_s->sample_idx - back - 1u) % BARCODE_HISTORY] >= mid))
+    {
+        back++;
+    }
+
+    p_s->b_black = false;
+
+    // Too short, or too faint against the contrast seen so far, is noise.
+    if ((back >= MIN_BAR_SAMPLES) &&
+        ((p_s->bar_peak - p_s->valley) >=
+         ((p_s->peak_env - p_s->valley) >> BARCODE_ACCEPT_SHIFT)))
+    {
+        push_edge(time_us - (back * US_PER_SAMPLE), true);
+        push_edge(time_us, false);
+        p_s->last_fall_idx = p_s->sample_idx;
+    }
+}
+
+
+/*!
+ * @brief Smooth one darkness reading.
+ *
+ * @param[in,out] p_s  Edge finder state (filter memory).
+ * @param[in]     now  Raw darkness.
+ *
+ * @return Filtered darkness.
+ *
+ * @par
+ * A single-sample spike cannot pass the 3-sample median; the running
+ * average of BARCODE_AVERAGE samples then cuts the remaining noise, at a
+ * cost of half that many samples of delay.
+ */
+static uint32_t
+filter_sample (sampler_t * p_s, uint32_t now)
+{
+    uint32_t const med = median3(p_s->prev2, p_s->prev1, now);
+
+    p_s->prev2 = p_s->prev1;
+    p_s->prev1 = now;
+
+    p_s->box_sum          -= p_s->box[p_s->box_pos];
+    p_s->box[p_s->box_pos] = med;
+    p_s->box_sum          += med;
+    p_s->box_pos           = (p_s->box_pos + 1u) % BOX_LEN;
+
+    return (p_s->box_sum / BOX_LEN);
+}
+
+
+/*!
+ * @brief Median of three values.
+ *
+ * @param[in] a_val  First value.
+ * @param[in] b_val  Second value.
+ * @param[in] c_val  Third value.
+ *
+ * @return The middle value.
+ */
+static uint32_t
+median3 (uint32_t a_val, uint32_t b_val, uint32_t c_val)
+{
+    uint32_t const hi_ab = (a_val > b_val) ? a_val : b_val;
+    uint32_t const lo_ab = (a_val > b_val) ? b_val : a_val;
+    uint32_t const mid   = (c_val > hi_ab) ? hi_ab :
+                           ((c_val < lo_ab) ? lo_ab : c_val);
+
+    return (mid);
+}
+#else
+/*!
+ * @brief GPIO interrupt: one edge of the digital barcode output.
+ *
+ * @param[in] pin      PIN_IR_BARCODE_DO.
+ * @param[in] edges    GPIO_IRQ_EDGE_* bits.
+ * @param[in] time_us  Time of the edge.
+ * @param[in] levels   Pin levels at that time.
+ *
+ * @par
+ * Only a change of colour is recorded.  Both edges in one interrupt mean a
+ * pulse shorter than the interrupt latency: comparator chatter at a blurred
+ * bar edge, never a real bar.  If the pin is back at the colour last
+ * recorded, the chatter is ignored; if it has changed, one clean edge is
+ * recorded.  (2026-11-11: this used to count as an overflow, which rejected
+ * captures that were otherwise complete.)
+ */
+static void
+barcode_edge_isr (uint32_t pin, uint32_t edges, uint32_t time_us,
+                  uint32_t levels)
+{
+    bool const b_black = (IR_DO_BLACK_IS_HIGH == ((levels >> pin) & 1u));
+
+    (void) edges;  // The pin level alone decides; see above.
+
+    if ((!gb_level_known) || (b_black != gb_last_black))
+    {
+        gb_level_known = true;
+        gb_last_black  = b_black;
+        push_edge(time_us, b_black);
+    }
+}
+#endif
 
 /*** end of file ***/
 

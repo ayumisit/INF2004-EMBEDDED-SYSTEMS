@@ -19,8 +19,8 @@
 #define WIDE_PER_CHAR           3u
 #define CHAR_STRIDE             (CODE39_ELEMENTS_PER_CHAR + 1u)
 #define TABLE_SIZE              44u
-#define RATIO_NUMERATOR         3u
-#define RATIO_DENOMINATOR       2u
+#define RATIO_NUMERATOR         13u     // Wide must be >= 1.3 x narrow.
+#define RATIO_DENOMINATOR       10u     // (Was 1.5; blur widens narrow bars.)
 #define FRAME_SYMBOL            ((uint8_t) '*')   // ASCII 42: exact.
 #define FIRST_LETTER            ((uint8_t) 'A')   // ASCII 65: exact.
 #define LAST_LETTER             ((uint8_t) 'Z')   // ASCII 90: exact.
@@ -94,7 +94,7 @@ static code39_result_t classify(uint32_t const * p_elements,
 
 
 /*!
- * @brief Decode a 29-element capture into its data letter.
+ * @brief Find and decode a 29-element frame in a capture.
  *
  * @param[in]  p_widths      Element widths in capture order, starting with
  *                           the first bar (any time unit).
@@ -112,15 +112,24 @@ code39_decode (uint32_t const * p_widths, uint32_t count, uint8_t * p_symbol,
 
     *p_b_reversed = false;
 
-    if (CODE39_FRAME_ELEMENTS == count)
+    // Stray edges before or after the barcode (such as the edge of its paper)
+    // only add elements, so try the frame at each position.  The reason
+    // reported on failure is that of the first position.
+    for (uint32_t start = 0u; (CODE39_OK != result) &&
+         ((start + CODE39_FRAME_ELEMENTS) <= count); start++)
     {
-        result = decode_frame(p_widths, p_symbol);
+        code39_result_t attempt = decode_frame(&p_widths[start], p_symbol);
 
-        if ((CODE39_OK != result) &&
-            (CODE39_OK == decode_reversed(p_widths, p_symbol)))
+        if ((CODE39_OK != attempt) &&
+            (CODE39_OK == decode_reversed(&p_widths[start], p_symbol)))
         {
-            result        = CODE39_OK;
+            attempt       = CODE39_OK;
             *p_b_reversed = true;
+        }
+
+        if ((0u == start) || (CODE39_OK == attempt))
+        {
+            result = attempt;
         }
     }
 

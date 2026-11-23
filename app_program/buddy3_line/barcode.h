@@ -72,6 +72,8 @@ typedef enum
 
 int32_t  barcode_start(void);
 uint32_t barcode_msg_letter(uint8_t msg);
+void     barcode_debug_levels(uint32_t * p_dark, uint32_t * p_white,
+                              uint32_t * p_black);
 
 #endif /* BARCODE_H */
 

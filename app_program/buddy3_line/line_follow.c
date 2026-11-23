@@ -38,6 +38,29 @@
 #define NORM_BLACK              700
 #define NORM_WHITE              200
 #define NORM_FOUND              500
+
+// Off-edge steering ramps, in offset units per 10 ms period.  The robot
+// follows the line's right edge.  A white centre usually means the line has
+// moved to the left, but if the centre saw black within CROSSED_MS it has
+// crossed the whole line (a right curve taken too wide) and the line is to
+// the right until the centre reaches black again.  A centre deep in black
+// means the line is curving right under it.  In each case the offset ramps
+// towards the line's side instead of jumping or sitting at +/-500, so the
+// turn tightens the longer the condition lasts and the D term sees no
+// step.  The left sensor seeing the line speeds the left ramp up and always
+// means left.  Back on the edge, the offset returns towards the sensor
+// value at most RELEASE per period.  Rates chosen in a host simulation
+// (notes/robot-turn-simulation-2026-11-04.md).
+// 2026-11-04: ramps roughly halved (were 100 / 200 / 200 / 30) for smoother
+// recovery at the slower follow speed, which covers half the distance in
+// the same time.
+// 2026-11-17 (build 8): 30 / 60 was tried and put back to 50 / 100; the
+// logs showed no less shake (the follow speed was lowered instead).
+#define WHITE_RAMP              50
+#define WHITE_RAMP_LEFT         100
+#define WHITE_RELEASE           80
+#define CROSSED_MS              150u
+#define BLACK_RAMP              15
 #define US_PER_STAMP_TICK       10000u
 #define STAMP_MASK              0x1Fu
 #define MS_PER_STAMP_TICK       10u
@@ -60,6 +83,9 @@ typedef struct
     uint32_t            junction_ms;
     uint32_t            lost_ms;
     uint32_t            found_ms;
+    int32_t             prev_offset;
+    uint32_t            since_black_ms;
+    int32_t             white_side;
 } line_ctx_t;
 
 static line_ctx_t       g_ctx;
@@ -73,10 +99,12 @@ static uint32_t volatile g_calib_seq    = 0u;      // Writer: Vehicle.
 static int32_t volatile  g_calib_white  = DEFAULT_WHITE_RAW;  // Vehicle.
 static int32_t volatile  g_calib_black  = DEFAULT_BLACK_RAW;  // Vehicle.
 static uint32_t volatile g_clear_seq    = 0u;      // Writer: Vehicle.
+static uint32_t volatile g_search_seq   = 0u;      // Writer: Vehicle.
 static int32_t volatile  g_calib_min    = ADC_MAX; // Writer: line task.
 static int32_t volatile  g_calib_max    = 0;       // Writer: line task.
 static uint32_t          g_calib_done   = 0u;      // Line task only.
 static uint32_t          g_clear_done   = 0u;      // Line task only.
+static uint32_t          g_search_done  = 0u;      // Line task only.
 
 static uint64_t         g_stack[STACK_SMALL / sizeof(uint64_t)];
 
@@ -85,6 +113,8 @@ static void    track_calibration(int32_t sample);
 static int32_t normalise(int32_t raw);
 static void    update_events(int32_t norm, bool b_left_black);
 static void    publish(int32_t offset, uint32_t raw, bool b_left_black);
+static int32_t shape_offset(int32_t offset, int32_t norm,
+                            bool b_left_black);
 
 
 /*!
@@ -105,6 +135,9 @@ line_follow_start (void)
     g_ctx.junction_ms = 0u;
     g_ctx.lost_ms     = 0u;
     g_ctx.found_ms    = 0u;
+    g_ctx.prev_offset    = 0;
+    g_ctx.since_black_ms = CROSSED_MS;
+    g_ctx.white_side     = -1;
 
     h_task = robot_ipc_start_task(line_follow_task, PRIO_LINE, g_stack,
                                   sizeof(g_stack));
@@ -252,12 +285,32 @@ line_follow_end_calibration (void)
 
 
 /*!
- * @brief Release the held JUNCTION once Vehicle Control has acted on it.
+ * @brief Tell the line task that Vehicle Control is following again.
+ *
+ * @par
+ * Releases a held JUNCTION and restarts line-loss detection.
  */
 void
 line_follow_clear_junction (void)
 {
     g_clear_seq++;
+}
+
+
+/*!
+ * @brief Ask for LINE_FOUND the next time the centre sensor meets a line.
+ *
+ * @par
+ * Used when Vehicle Control drives or turns towards a line it has left on
+ * purpose (the bypass return).  The line task moves to SEARCHING at once,
+ * whatever it was doing, so a junction held from crossing another line
+ * during the detour cannot block the report, and a LINE_FOUND raised after
+ * this call always belongs to this search.
+ */
+void
+line_follow_begin_search (void)
+{
+    g_search_seq++;
 }
 
 
@@ -289,13 +342,7 @@ line_follow_task (INT start_code, void * p_ext_info)
 
         track_calibration(sample);
         norm   = normalise(sample);
-        offset = norm - NORM_HALF;
-
-        if (b_left_black && (norm < NORM_WHITE))
-        {
-            // Only the left sensor sees the line: it is far to the left.
-            offset = -LINE_OFFSET_LIMIT;
-        }
+        offset = shape_offset(norm - NORM_HALF, norm, b_left_black);
 
         if (LINE_STATE_CALIBRATING != g_ctx.state)
         {
@@ -304,6 +351,103 @@ line_follow_task (INT start_code, void * p_ext_info)
 
         publish(offset, raw, b_left_black);
     }
+}
+
+
+/*!
+ * @brief Ramp the offset while the centre is off the line.
+ *
+ * @param[in] offset        Raw offset, norm - NORM_HALF.
+ * @param[in] norm          Normalised centre darkness.
+ * @param[in] b_left_black  Left sensor sees black.
+ *
+ * @return Offset to publish.
+ *
+ * @par
+ * On entering white the side is chosen once: right if the centre saw black
+ * within CROSSED_MS, otherwise left; the left sensor forces left.  The
+ * offset then moves towards that side's limit by a fixed step each period.
+ * On the edge it follows the sensor, except that after a white spell it
+ * may not move faster than WHITE_RELEASE towards it.
+ */
+static int32_t
+shape_offset (int32_t offset, int32_t norm, bool b_left_black)
+{
+    int32_t const prev    = g_ctx.prev_offset;
+    bool const    b_white = (norm < NORM_WHITE);
+    int32_t       result  = offset;
+
+    if (b_white && (g_ctx.white_side < 0) && (prev >= -NORM_HALF) &&
+        (prev <= NORM_HALF))
+    {
+        // Just left the line: it crossed to the far side if the centre saw
+        // black just before.
+        g_ctx.white_side = (g_ctx.since_black_ms < CROSSED_MS) ? 1 : -1;
+    }
+
+    if (b_left_black || (norm > NORM_BLACK))
+    {
+        // Back on the line (or the left sensor sees it): normal edge rules.
+        g_ctx.white_side = -1;
+    }
+
+    if (norm > NORM_BLACK)
+    {
+        g_ctx.since_black_ms = 0u;
+    }
+    else if (g_ctx.since_black_ms < CROSSED_MS)
+    {
+        g_ctx.since_black_ms += MS_PER_PERIOD;
+    }
+    else
+    {
+        // Saturated: black is long past.
+    }
+
+    if (g_ctx.white_side > 0)
+    {
+        // Crossed: the centre is on the line's far (left) side.  Keep
+        // turning right until it reaches black, even over the grey edge,
+        // where the raw offset would point the wrong way.
+        int32_t const start = (prev > 0) ? prev : 0;
+
+        result = fix_math_clamp(start + WHITE_RAMP, -LINE_OFFSET_LIMIT,
+                                LINE_OFFSET_LIMIT);
+    }
+    else if (b_white)
+    {
+        // Line to the left: turn left harder the longer it stays white.
+        int32_t const step  = b_left_black ? WHITE_RAMP_LEFT : WHITE_RAMP;
+        int32_t const start = (prev < offset) ? prev : offset;
+
+        result = fix_math_clamp(start - step, -LINE_OFFSET_LIMIT,
+                                LINE_OFFSET_LIMIT);
+    }
+    else if ((norm > NORM_BLACK) && (!b_left_black))
+    {
+        // Centre deep in black: the line is curving right under it.  Turn
+        // harder the longer it stays there, as on the white side.
+        int32_t const start = (prev > offset) ? prev : offset;
+
+        result = fix_math_clamp(start + BLACK_RAMP, -LINE_OFFSET_LIMIT,
+                                LINE_OFFSET_LIMIT);
+    }
+    else if ((prev < -NORM_HALF) && (offset > (prev + WHITE_RELEASE)))
+    {
+        result = prev + WHITE_RELEASE;
+    }
+    else if ((prev > NORM_HALF) && (offset < (prev - WHITE_RELEASE)))
+    {
+        result = prev - WHITE_RELEASE;
+    }
+    else
+    {
+        // On the edge: use the sensor value.
+    }
+
+    g_ctx.prev_offset = result;
+
+    return (result);
 }
 
 
@@ -402,6 +546,27 @@ update_events (int32_t norm, bool b_left_black)
     bool const b_both_black = b_left_black && (norm > NORM_BLACK);
     bool const b_both_white = (!b_left_black) && (norm < NORM_WHITE);
 
+    // Vehicle Control has resumed following.  Start again from TRACKING with
+    // fresh timers, so time spent off the line during a manoeuvre does not
+    // count as line loss, and a real loss is always reported again.
+    if (g_clear_seq != g_clear_done)
+    {
+        g_clear_done      = g_clear_seq;
+        g_ctx.state       = LINE_STATE_TRACKING;
+        g_ctx.junction_ms = 0u;
+        g_ctx.lost_ms     = 0u;
+    }
+
+    // Vehicle Control is heading for a line: report it when it is seen.
+    if (g_search_seq != g_search_done)
+    {
+        g_search_done     = g_search_seq;
+        g_ctx.state       = LINE_STATE_SEARCHING;
+        g_ctx.junction_ms = 0u;
+        g_ctx.lost_ms     = 0u;
+        g_ctx.found_ms    = 0u;
+    }
+
     g_ctx.junction_ms = b_both_black ? (g_ctx.junction_ms + MS_PER_PERIOD) :
                                        0u;
     g_ctx.lost_ms     = b_both_white ? (g_ctx.lost_ms + MS_PER_PERIOD) : 0u;
@@ -413,8 +578,7 @@ update_events (int32_t norm, bool b_left_black)
         case LINE_STATE_TRACKING:
             if (g_ctx.junction_ms >= LINE_JUNCTION_MS)
             {
-                g_ctx.state  = LINE_STATE_JUNCTION;
-                g_clear_done = g_clear_seq;
+                g_ctx.state = LINE_STATE_JUNCTION;
                 robot_ipc_flag_set(ROBOT_IPC_FLAG_VEHICLE,
                                    ROBOT_EVT_JUNCTION);
             }
@@ -433,11 +597,6 @@ update_events (int32_t norm, bool b_left_black)
 
         case LINE_STATE_JUNCTION:
             // Held until Vehicle Control has executed the junction action.
-            if (g_clear_seq != g_clear_done)
-            {
-                g_clear_done = g_clear_seq;
-                g_ctx.state  = LINE_STATE_TRACKING;
-            }
         break;
 
         case LINE_STATE_SEARCHING:

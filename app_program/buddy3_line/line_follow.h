@@ -64,6 +64,7 @@ uint32_t            line_follow_age_ms(uint32_t word);
 void                line_follow_begin_calibration(void);
 bool                line_follow_end_calibration(void);
 void                line_follow_clear_junction(void);
+void                line_follow_begin_search(void);
 
 #endif /* LINE_FOLLOW_H */
 

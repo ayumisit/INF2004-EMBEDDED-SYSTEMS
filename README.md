@@ -4,8 +4,9 @@ Line-following robot car on a Raspberry Pi Pico W + Cytron Robo Pico, running
 **micro T-Kernel 3.0** (RP2040 port by sirfonzie) and written in C to the
 **Barr-C:2018** coding standard.
 
-The robot follows a black line, reads Code 39 barcodes to decide turns
-(A = left, B = right, C = straight, D = U-turn), measures hump height,
+The robot follows a black line, reads Code 39 barcodes (A to Z, in either
+direction) to decide its turn at the next junction (the letter-to-movement
+map is sent from the PC over MQTT, never hard-coded), measures hump height,
 detects and drives around obstacles, and reports telemetry over MQTT.
 
 ## Team
@@ -27,7 +28,7 @@ settings) and `app_program/integration/` (vehicle state machine, barcode map).
 |---|---|
 | Left motor / right motor | GP8, GP9 / GP10, GP11 (Robo Pico M1 / M2) |
 | Left / right wheel encoder | GP26 / GP6 |
-| Centre IR (AO) / left IR (DO) / barcode IR (DO) | GP27 / GP3 / GP28 |
+| Centre IR (AO) / left IR (DO) / barcode IR (AO) | GP27 / GP3 / GP28 |
 | IMU LSM303 (I2C SDA / SCL) | GP0 / GP1 |
 | Ultrasonic ECHO / TRIG | GP4 / GP5 |
 | Servo | GP15 |
@@ -42,14 +43,14 @@ Needs the Arm GCC toolchain, GNU make and the Pico SDK (we build in WSL/Ubuntu).
 
 ```
 cd build_make
-make SMP=0 CONSOLE=usb_cdc DEBUG_MON=1 PICO_SDK_PATH=~/pico-sdk -j8
+make SMP=0 CONSOLE=usb_cdc DEBUG_MON=1 PICO_SDK_PATH=~/pico/pico-sdk -j8
 ```
 
 Full robot with Wi-Fi/MQTT (put your network in `config/wifi_credentials.h`
 first, never commit it):
 
 ```
-make SMP=0 CONSOLE=usb_cdc WIFI=cyw43 WIFI_JOIN=1 WIFI_NETIF=1 WIFI_DHCP=1 MQTT=1 PICO_SDK_PATH=~/pico-sdk -j8
+make SMP=0 CONSOLE=usb_cdc WIFI=cyw43 WIFI_JOIN=1 WIFI_NETIF=1 WIFI_DHCP=1 MQTT=1 PICO_SDK_PATH=~/pico/pico-sdk -j8
 ```
 
 Single-buddy bench tests: add `BUDDY_TEST=2`, `3` or `23`.
@@ -70,14 +71,3 @@ Flash: hold BOOTSEL, plug in, copy the `.uf2` from `build_make` onto RPI-RP2.
 ---
 
 # About the micro T-Kernel RP2040 port
-
-
-
-## AAI03 robot application
-
-This fork runs the INF2004 AAI03 robot car (Buddies 1-5 plus vehicle
-integration) on the single-core micro T-Kernel build.  Start with
-[docs/AAI03_ROBOT.md](docs/AAI03_ROBOT.md) for wiring, build commands,
-tasks and the bring-up checklist.  Kernel port changes are listed in
-[docs/PORT_CHANGES.md](docs/PORT_CHANGES.md); Barr-C compliance in
-[docs/BARR_C_COMPLIANCE.md](docs/BARR_C_COMPLIANCE.md).

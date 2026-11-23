@@ -36,7 +36,7 @@
 typedef enum
 {
     CODE39_OK = 0,
-    CODE39_BAD_COUNT,       // Not 29 elements.
+    CODE39_BAD_COUNT,       // Fewer than 29 elements.
     CODE39_BAD_RATIO,       // Wide and narrow elements not separable.
     CODE39_NO_MATCH,        // A pattern is not a Code 39 character.
     CODE39_BAD_FRAME        // Not of the form *X* with X in A..Z.
