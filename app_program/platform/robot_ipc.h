@@ -49,7 +49,8 @@
 #define ROBOT_EVT_CTRL_CMD          0x0200u
 #define ROBOT_EVT_FAULT             0x0400u
 #define ROBOT_EVT_ECHO_FAULT        0x0800u
-#define ROBOT_EVT_ALL               0x0FFFu
+#define ROBOT_EVT_LIFTED            0x1000u
+#define ROBOT_EVT_ALL               0x1FFFu
 
 // flg_fault bits: one bit per fault condition (Change Requirement 1).
 #define ROBOT_FAULT_MOTOR_STALL     0x01u

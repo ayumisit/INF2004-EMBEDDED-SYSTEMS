@@ -37,6 +37,9 @@ typedef enum
     TUNE_ENC_UM_PER_EDGE,       // Wheel travel per encoder edge, um.
     TUNE_TRACK_MM,              // Wheel-to-wheel distance, mm (turn angle).
     TUNE_REVERSE_MM,            // Reverse distance on REVERSE_RETRY, mm.
+    TUNE_TURN_RIGHT_PERCENT,    // Right on-the-spot turn size, %.
+    TUNE_TURN_LEFT_PERCENT,     // Left on-the-spot turn size, %.
+    TUNE_OBS_BEAM_DEG,          // Sonar beam correction per edge, deg.
     TUNE_COUNT
 } tune_param_t;
 
