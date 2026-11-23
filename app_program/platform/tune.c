@@ -34,7 +34,10 @@ static int32_t volatile g_values[TUNE_COUNT] =
     STEER_DIRECTION,
     (int32_t) ENC_UM_PER_EDGE,          // Cast: unsigned constant, exact.
     (int32_t) TRACK_WIDTH_MM,           // Cast: unsigned constant, exact.
-    (int32_t) REVERSE_DISTANCE_MM       // Cast: unsigned constant, exact.
+    (int32_t) REVERSE_DISTANCE_MM,      // Cast: unsigned constant, exact.
+    (int32_t) TURN_RIGHT_PERCENT,       // Cast: unsigned constant, exact.
+    (int32_t) TURN_LEFT_PERCENT,        // Cast: unsigned constant, exact.
+    (int32_t) OBS_BEAM_HALF_DEG         // Cast: unsigned constant, exact.
 };
 
 static tune_range_t const g_ranges[TUNE_COUNT] =
@@ -46,9 +49,12 @@ static tune_range_t const g_ranges[TUNE_COUNT] =
     { 0, 3000 },        // TUNE_STEER_KP
     { 0, 3000 },        // TUNE_STEER_KD
     { -1, 1 },          // TUNE_STEER_DIR (0 rejected below)
-    { 500, 30000 },     // TUNE_ENC_UM_PER_EDGE
+    { 50, 30000 },      // TUNE_ENC_UM_PER_EDGE
     { 50, 300 },        // TUNE_TRACK_MM
-    { 0, 500 }          // TUNE_REVERSE_MM
+    { 0, 500 },         // TUNE_REVERSE_MM
+    { 50, 150 },        // TUNE_TURN_RIGHT_PERCENT
+    { 50, 150 },        // TUNE_TURN_LEFT_PERCENT
+    { 0, 20 }           // TUNE_OBS_BEAM_DEG
 };
 
 
