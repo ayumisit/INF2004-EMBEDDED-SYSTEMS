@@ -26,7 +26,7 @@ For what the robot does and how the code is organised, see the
 | Arm GNU toolchain (`arm-none-eabi-gcc`) | Compiles the firmware |
 | GNU make | The build system (`mingw32-make` on Windows) |
 | A host C++ compiler (`g++`) | Builds the `elf2uf2` converter once, on the first build |
-| Pico SDK **2.2.0** | USB console, Wi-Fi driver and lwIP |
+| Pico SDK **2.2.0** | Hardware drivers, USB console, Wi-Fi driver and lwIP |
 | Python 3 | Runs the Barr-C check before every build, and the PC tools |
 | Mosquitto + `paho-mqtt` | MQTT broker and Python client for the dashboard |
 
@@ -145,7 +145,9 @@ stop with an error:
 | `The robot application needs the Pico SDK. Set PICO_SDK_PATH` | SDK not found |
 
 Switching between build settings needs no `make clean`: the build notices and
-discards objects from the old settings.
+discards objects from the old settings. The exception is `DEBUG_MON`: run
+`make clean` after changing it, because `barcode.c` reads it but is not
+rebuilt.
 
 ### Smaller builds
 
@@ -192,7 +194,8 @@ AAI03 robot: boot failures 0x0000
 | `0x0004` | Telemetry | `0x0100` | Vehicle Control |
 | `0x0008` | Motion | `0x0200` | GPIO interrupt |
 | `0x0010` | Line following | `0x0400` | Period tick |
-| `0x0020` | Barcode | `0x0800` | Bench test task |
+| `0x0020` | Barcode | `0x0800` | Bench test task or debug monitor |
+| | | `0x1000` | Buzzer |
 
 With `DEBUG_MON=1`, a status line follows with the vehicle state, wheel
 speeds, line, IMU, obstacle and faults.
@@ -229,8 +232,10 @@ named here is in `app_program/platform/robot_cfg.h`.
    barcode sensors) or `IR_AO_BLACK_IS_HIGH` (centre sensor).
 6. **Barcode sensor.** Adjust the module's potentiometer so its LED flickers
    once per bar as a barcode passes under it.
-7. **IMU axis.** Tilt the nose up; pitch must go positive. Otherwise change
-   `IMU_FORWARD_AXIS` / `IMU_FORWARD_SIGN`.
+7. **IMU axis.** With the robot flat, the monitor's `tilt` must read about 0;
+   tilt the nose up about 30 degrees and it must read about 30. `tilt` is
+   pitch and roll combined and is never negative. If it does not follow,
+   check `IMU_FORWARD_AXIS` / `IMU_FORWARD_SIGN`.
 8. **Servo direction.** During a scan, 150° must point left. Otherwise set
    `SERVO_LEFT_IS_HIGH` to `0u`.
 9. **Tune on the track.** Speeds (`SPEED_*`), PID (`PID_*`) and steering
@@ -271,13 +276,14 @@ Allow incoming connections on port 1883 if the firewall asks.
 
 ### Dashboard keys
 
-Click the dashboard window first.
+Click the dashboard window first. The keys work on Windows only; on other
+systems send commands with `tools/tlm_decode.py send ...`.
 
 | Key | Action |
 |---|---|
 | S | Start a run |
 | X | Stop the run and publish a summary |
-| R | Reset from SAFE_STOP or MISSION_COMPLETE to READY |
+| R | Reset any stopped state (also INITIALISING, ending its settle early) to READY |
 | U | Request a summary |
 | W | Scan the obstacle in front and show its width (robot stopped) |
 | M | Send the barcode map |

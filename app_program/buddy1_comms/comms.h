@@ -14,6 +14,7 @@
  * @par
  * Status word SYS_STATUS_COMMS (LSB first): [2:0] link state,
  * [10:3] reconnections (saturating), [18:11] dropped messages (saturating).
+ * In an MQTT=0 build the word is written once (DISABLED, counts 0).
  *
  * @par
  * COPYRIGHT NOTICE: (c) 2026 AAI03 team, INF2004.  All rights reserved.

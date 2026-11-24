@@ -9,7 +9,7 @@
  * needs no lock; MQTT updates reach it through mbf_ctrl_cmd.
  *
  * @par
- * Activation rule (Tribunal 1): a letter is resolved to its action when the
+ * Activation rule: a letter is resolved to its action when the
  * barcode is decoded, so a map update applies from the next barcode and
  * never changes a command already latched for the coming junction.
  *

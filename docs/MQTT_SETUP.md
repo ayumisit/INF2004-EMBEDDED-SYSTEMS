@@ -84,7 +84,8 @@ python3 tools/tlm_decode.py tune track_mm 130 --broker 192.168.1.10
 ## Live calibration
 
 `tune` changes a setting without rebuilding, so the robot can be calibrated over
-MQTT. Changes are lost on reset, so copy good values into
+MQTT. Changes are lost at power-off or reboot (the `reset` command keeps
+them), so copy good values into
 `app_program/platform/robot_cfg.h`. Useful settings are `enc_um_per_edge`,
 `track_mm` and `steer_dir`.
 

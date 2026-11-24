@@ -4,9 +4,11 @@
  *        run summaries (Week 6 NFR15).
  *
  * @par
- * The lowest-priority application task.  It only formats messages and
- * queues them for the radio-owner task; a delayed frame shows up as a gap in
- * the sequence number, never as a control fault.
+ * A low-priority task, below every control and sensing task.  It only
+ * formats messages and queues them for the radio-owner task.  A late
+ * period is counted in the HEALTH word; a frame dropped on the way out
+ * leaves a gap in the sequence number shared by TELEMETRY, HEARTBEAT and
+ * EVENT frames.  Neither is ever a control fault.
  *
  * @par
  * COPYRIGHT NOTICE: (c) 2026 AAI03 team, INF2004.  All rights reserved.

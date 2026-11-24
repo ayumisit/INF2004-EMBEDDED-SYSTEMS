@@ -3,9 +3,11 @@
  * @brief Buzzer Task: short sound cues for detected events.
  *
  * @par
- * Each cue has its own request flag, written only by buzzer_play() and
- * cleared only by this task, so no request word is shared between writers.
- * A request made while the same cue is already pending merges with it.
+ * Each cue has its own request flag.  buzzer_play() sets it (one task
+ * requests each cue: Barcode the BARCODE cue, IMU the HUMP cue) and only
+ * this task clears it.  Each is a single byte store, so a set and a clear
+ * cannot corrupt each other; a request made while the same cue is pending
+ * merges with it.
  *
  * @par
  * COPYRIGHT NOTICE: (c) 2026 AAI03 team, INF2004.  All rights reserved.
@@ -49,7 +51,8 @@ static cue_t const g_cues[BUZZER_CUE_COUNT] =
     { { { 1000u, 300u }, { 0u, 0u } }, 1u, 0u }         // HUMP
 };
 
-static bool volatile g_requested[BUZZER_CUE_COUNT];   // Writer: callers.
+// Set by buzzer_play(), cleared by buzzer_task().
+static bool volatile g_requested[BUZZER_CUE_COUNT];
 static uint64_t      g_stack[STACK_SMALL / sizeof(uint64_t)];
 
 static void buzzer_task(INT start_code, void * p_ext_info);

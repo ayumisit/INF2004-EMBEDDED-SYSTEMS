@@ -93,7 +93,7 @@ static TMO    to_kernel_timeout(int32_t timeout_ms);
 /*!
  * @brief Create every shared kernel object.
  *
- * @return 0 on success, or the first negative kernel error code.
+ * @return 0 on success, or the last negative kernel error code seen.
  *
  * @par
  * Called once from usermain() before any subsystem task is started.
@@ -444,7 +444,8 @@ robot_ipc_unlock (robot_ipc_lock_t lock)
 /*!
  * @brief Put the calling task to sleep.
  *
- * @param[in] delay_ms  Milliseconds (rounded up to the 10 ms kernel tick).
+ * @param[in] delay_ms  Minimum delay in ms; the kernel can add up to one
+ *                      10 ms tick.
  */
 void
 robot_ipc_sleep_ms (uint32_t delay_ms)

@@ -4,8 +4,10 @@
  *        fine scanning, and profiling (Buddy 5, Week 6 Section 6.6).
  *
  * @par
- * MONITOR pings straight ahead every MONITOR_PERIOD_MS.  Two readings in a
- * row below OBSTACLE_DETECT_MM set ROBOT_EVT_OBSTACLE.  On SCAN_REQ
+ * MONITOR pings straight ahead, waiting MONITOR_PERIOD_MS between pings.
+ * Two readings below the live detection distance (TUNE_OBS_DETECT_MM,
+ * default OBSTACLE_DETECT_MM), with no clear reading between them, set
+ * ROBOT_EVT_OBSTACLE; turning or braking restarts the count.  On SCAN_REQ
  * (obstacle_request_scan) the task runs a coarse scan at 30, 60, 90, 120
  * and 150 degrees, a fine 5-degree scan across the obstacle, computes the
  * profile and plan, sends it on mbf_obs_profile and sets
@@ -13,8 +15,9 @@
  * (ROBOT_FAULT_NO_ECHO and ROBOT_EVT_ECHO_FAULT).
  *
  * @par
- * Status word SYS_STATUS_OBSTACLE (LSB first): [7:0] forward distance cm
- * (255 = nothing in range), [10:8] state, [13:11] last plan,
+ * Status word SYS_STATUS_OBSTACLE (LSB first): [7:0] last forward
+ * distance cm, updated below the detection distance or at and beyond
+ * the release distance (255 = no echo), [10:8] state, [13:11] last plan,
  * [19:14] profiles made (saturating), [23:20] echo faults (saturating).
  *
  * @par

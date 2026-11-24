@@ -3,9 +3,11 @@
  * @brief Buddy 3 stand-alone bench test: IR sensors, line state, barcodes.
  *
  * @par
- * Built only with BUDDY_TEST=3.  The robot then starts the Buddy 3 tasks and
- * this test task, nothing else: the motors stay off, and the IR readings,
- * line states and decoded barcodes are printed on the USB console.
+ * Started only with BUDDY_TEST=3 (see app_main.c); the BUDDY_TEST=23 test
+ * also calls buddy3_test_calibrate() and buddy3_test_report_events().  The
+ * robot then starts the Buddy 3 tasks, this test task and the Buzzer Task
+ * that every build starts: the motors stay off, and the IR readings, line
+ * states and decoded barcodes are printed on the USB console.
  *
  * @par
  * COPYRIGHT NOTICE: (c) 2026 AAI03 team, INF2004.  All rights reserved.

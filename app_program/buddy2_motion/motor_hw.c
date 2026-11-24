@@ -55,7 +55,8 @@ motor_hw_init (void)
  * @param[in] right_permille  -1000 (full reverse) to +1000 (full forward).
  *
  * @par
- * Zero coasts the motor.  Values beyond MOTOR_MAX_PERMILLE are clamped.
+ * Zero coasts the motor.  Values beyond the live speed limit
+ * (TUNE_MOTOR_MAX, initially MOTOR_MAX_PERMILLE) are clamped.
  */
 void
 motor_hw_set (int32_t left_permille, int32_t right_permille)
@@ -85,7 +86,7 @@ motor_hw_brake (void)
  *
  * @param[in] pin_a       Forward input pin.
  * @param[in] pin_b       Reverse input pin.
- * @param[in] permille    Signed drive, clamped to +/-MOTOR_MAX_PERMILLE.
+ * @param[in] permille    Signed drive, clamped to +/-TUNE_MOTOR_MAX.
  * @param[in] b_reversed  true if the motor is mounted the other way round.
  */
 static void

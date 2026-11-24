@@ -195,7 +195,7 @@ fix_math_cos_q15 (int32_t angle_mdeg)
  * @param[in] y_value  Opposite component (any integer unit).
  * @param[in] x_value  Adjacent component (same unit as y_value).
  *
- * @return atan2(y, x) in millidegrees, in the range (-180000, 180000].
+ * @return atan2(y, x) in millidegrees, in the range [-180000, 180000].
  *         Returns 0 when both inputs are 0.
  */
 int32_t
@@ -326,7 +326,8 @@ atan_unit_mdeg (int32_t ratio_q15)
 {
     int32_t const linear = (ATAN_LINEAR_MDEG * ratio_q15) / FIX_MATH_Q15_ONE;
 
-    // z (1 - z) in Q15, kept below 2^13 before scaling to avoid overflow.
+    // z (1 - z) in Q15 is at most 2^13, so the scaling below cannot
+    // overflow.
     int32_t const bend   = (ratio_q15 * (FIX_MATH_Q15_ONE - ratio_q15)) /
                            FIX_MATH_Q15_ONE;
 

@@ -1,13 +1,15 @@
 /** @file debug_mon.h
  *
- * @brief USB console monitor for the full mission (no MQTT needed).
+ * @brief USB console monitor for the full mission (MQTT not required).
  *
  * @par
- * Built only with DEBUG_MON=1.  A lowest-priority task reads the packed
+ * Built only with DEBUG_MON=1.  A low-priority task reads the packed
  * status words every subsystem already publishes and prints them on the USB
  * console: one status line per second, plus a line the moment the vehicle
- * state, the faults, the last barcode, the hump count or the obstacle state
- * changes.  It only reads; it never takes a message or changes behaviour.
+ * state, the faults, the last barcode, a barcode reject, the hump count, a
+ * lift or the obstacle state changes.  It also sends the line-following
+ * record on the MQTT debug topic and prints it on the console every 15 s
+ * when idle.  It never commands a task, so it never changes behaviour.
  *
  * @par
  * COPYRIGHT NOTICE: (c) 2026 AAI03 team, INF2004.  All rights reserved.

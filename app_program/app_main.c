@@ -9,10 +9,12 @@
  * interrupt or period release can reach a task that does not exist yet.
  *
  * @par
- * Communication is started first even though it does not need to be: the
- * radio task already joins WiFi in the background, and registering the
- * network poll early lets the link come up while the rest boots.  A
- * communication failure never prevents the robot from running (NFR1).
+ * Communication is the first mission subsystem started (only the buzzer,
+ * used by every build, comes before it) even though it does not need to
+ * be: the radio task already joins WiFi in the background, and
+ * registering the network poll early lets the link come up while the
+ * rest boots.  A communication failure never prevents the robot from
+ * running (NFR1).
  *
  * @par
  * COPYRIGHT NOTICE: (c) 2026 AAI03 team, INF2004.  All rights reserved.
@@ -76,7 +78,7 @@ static void start_mission(void);
 /*!
  * @brief micro T-Kernel user entry point.
  *
- * @return Never returns while the robot runs (the kernel would shut down).
+ * @return Never returns (returning would shut the kernel down).
  */
 INT
 usermain (void)

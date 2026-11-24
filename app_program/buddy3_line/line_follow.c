@@ -6,7 +6,7 @@
  * @par
  * Statechart: Week 6 Section 6.3.  Debounce intervals are defined in time
  * (milliseconds), not sample counts, so they do not change if the task
- * period changes (Tribunal 1 decision on assumption A8).
+ * period changes.
  *
  * @par
  * Calibration: Vehicle Control sweeps the robot across the line while this
@@ -47,15 +47,10 @@
 // means the line is curving right under it.  In each case the offset ramps
 // towards the line's side instead of jumping or sitting at +/-500, so the
 // turn tightens the longer the condition lasts and the D term sees no
-// step.  The left sensor seeing the line speeds the left ramp up and always
-// means left.  Back on the edge, the offset returns towards the sensor
-// value at most RELEASE per period.  Rates chosen in a host simulation
-// (notes/robot-turn-simulation-2026-11-04.md).
-// 2026-11-04: ramps roughly halved (were 100 / 200 / 200 / 30) for smoother
-// recovery at the slower follow speed, which covers half the distance in
-// the same time.
-// 2026-11-17 (build 8): 30 / 60 was tried and put back to 50 / 100; the
-// logs showed no less shake (the follow speed was lowered instead).
+// step.  The left sensor seeing the line cancels the crossed case and,
+// while the centre is white, speeds the left ramp up.  Back on the edge,
+// the offset returns towards the sensor value at most WHITE_RELEASE per
+// period.  The rates are sized for smooth recovery at the follow speed.
 #define WHITE_RAMP              50
 #define WHITE_RAMP_LEFT         100
 #define WHITE_RELEASE           80
@@ -90,10 +85,11 @@ typedef struct
 
 static line_ctx_t       g_ctx;
 
-// Hand-shake with Vehicle Control.  Every variable has exactly one writer
-// task and is one aligned word, so plain loads and stores are atomic.  A
-// request is a sequence number the requester increments; the line task
-// acts when the number differs from the last one it handled.
+// Hand-shake with Vehicle Control (or a bench test).  Every variable has
+// exactly one writer task and is a single aligned byte or word, so plain
+// loads and stores are atomic.  A request is a sequence number the
+// requester increments; the line task acts when the number differs from
+// the last one it handled.
 static bool volatile     gb_calibrating = false;   // Writer: Vehicle.
 static uint32_t volatile g_calib_seq    = 0u;      // Writer: Vehicle.
 static int32_t volatile  g_calib_white  = DEFAULT_WHITE_RAW;  // Vehicle.
@@ -302,10 +298,11 @@ line_follow_clear_junction (void)
  *
  * @par
  * Used when Vehicle Control drives or turns towards a line it has left on
- * purpose (the bypass return).  The line task moves to SEARCHING at once,
- * whatever it was doing, so a junction held from crossing another line
- * during the detour cannot block the report, and a LINE_FOUND raised after
- * this call always belongs to this search.
+ * purpose (the bypass return).  At its next period the line task moves to
+ * SEARCHING whatever it was doing (after calibration, if one is running),
+ * so a junction held from crossing another line during the detour cannot
+ * block the report, and a LINE_FOUND raised after this call always belongs
+ * to this search.
  */
 void
 line_follow_begin_search (void)
@@ -367,8 +364,9 @@ line_follow_task (INT start_code, void * p_ext_info)
  * On entering white the side is chosen once: right if the centre saw black
  * within CROSSED_MS, otherwise left; the left sensor forces left.  The
  * offset then moves towards that side's limit by a fixed step each period.
- * On the edge it follows the sensor, except that after a white spell it
- * may not move faster than WHITE_RELEASE towards it.
+ * On the edge it follows the sensor, except that after a ramp has taken
+ * the offset beyond +/-NORM_HALF (a white or deep-black spell) it may not
+ * move faster than WHITE_RELEASE towards it.
  */
 static int32_t
 shape_offset (int32_t offset, int32_t norm, bool b_left_black)
@@ -630,7 +628,6 @@ publish (int32_t offset, uint32_t raw, bool b_left_black)
                            STAMP_MASK;
     uint32_t       word  = 0u;
 
-    // The state enumeration is below 8, so the cast is exact.
     word = bitpack_word_set(word, LINE_OFFSET_SHIFT, LINE_OFFSET_WIDTH,
                             bitpack_from_signed(offset, LINE_OFFSET_WIDTH));
     word = bitpack_word_set(word, LINE_CENTRE_SHIFT, LINE_CENTRE_WIDTH, raw);

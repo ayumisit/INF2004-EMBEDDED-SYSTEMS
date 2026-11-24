@@ -193,7 +193,7 @@ monitor_once (void)
 {
     uint32_t                  distance_mm = 0u;
     ultrasonic_result_t const result      = ultrasonic_measure(&distance_mm);
-    // Live setting (2026-11-24), 100..300 mm, so the cast is exact.
+    // Live setting, 100..300 mm, so the cast is exact.
     uint32_t const            detect_mm   =
         (uint32_t) tune_get(TUNE_OBS_DETECT_MM);
 
@@ -252,7 +252,7 @@ monitor_once (void)
 
 
 /*!
- * @brief Report whether the robot is turning or stopping after a turn.
+ * @brief Report whether the robot is turning or braking to a stop.
  *
  * @return true in MOTION_MODE_TURNING or MOTION_MODE_BRAKING.
  */
@@ -332,9 +332,11 @@ run_scan (void)
  * @param[in] settle_ms  Settling time before measuring.
  *
  * @par
- * The sample is the middle of SCAN_PINGS readings, and has an echo only if
- * at least SCAN_ECHOES_NEEDED pings returned one.  Sensor faults are left
- * out of the scan so they never look like a clear path (obs_profile.h).
+ * The sample is the middle of the readings that echoed (of SCAN_PINGS),
+ * and has an echo only if at least SCAN_ECHOES_NEEDED pings returned one.
+ * An angle where every ping was a sensor fault is left out of the scan, so
+ * a dead sensor never looks like a clear path (obs_profile.h); a faulted
+ * ping at an angle that is kept counts as a missing echo.
  */
 static void
 measure_at (uint32_t angle_deg, uint32_t settle_ms)
@@ -464,8 +466,8 @@ send_profile (obs_profile_t const * p_profile)
     uint32_t data = 0u;
 
     obs_profile_pack(p_profile, msg);
-    // A full buffer means Vehicle Control still holds an unread profile,
-    // so the (void) discards a result that needs no action.
+    // A full buffer (two unread profiles) drops this one; the result is
+    // not acted on.
     (void) robot_ipc_send(ROBOT_IPC_MBF_OBS_PROFILE, msg, sizeof(msg),
                           ROBOT_IPC_POLL);
     robot_ipc_flag_set(ROBOT_IPC_FLAG_VEHICLE, ROBOT_EVT_OBS_PROFILE);

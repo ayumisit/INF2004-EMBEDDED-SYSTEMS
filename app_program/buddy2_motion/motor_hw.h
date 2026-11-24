@@ -3,9 +3,10 @@
  * @brief Robo Pico dual DC-motor driver (GP8-GP11) on RP2040 PWM.
  *
  * @par
- * Owner: Buddy 2 (Motion Control).  Only the Motion Control task may call
- * these functions (Week 6: "only the Motion Control Task writes the motor
- * pins").
+ * Owner: Buddy 2 (Motion Control).  Only the Motion Control task drives the
+ * motors (Week 6: "only the Motion Control Task writes the motor pins").
+ * Test builds without Motion Control call motor_hw_init() only, to hold
+ * both motors at coast.
  *
  * @par
  * COPYRIGHT NOTICE: (c) 2026 AAI03 team, INF2004.  All rights reserved.

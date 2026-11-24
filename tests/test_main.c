@@ -123,7 +123,7 @@ near (int32_t value, int32_t expected, int32_t tolerance)
 /*!
  * @brief Element widths of "*X*" for a data symbol, with small jitter.
  *
- * @param[in]  data_symbol  ASCII letter.
+ * @param[in]  data_symbol  Code 39 character (a letter, or '1' to test).
  * @param[out] p_widths     29 widths.
  *
  * @return Number of elements written.
@@ -405,7 +405,7 @@ test_hump (void)
     CHECK(1u == run_hump(&hump, 12000, 20u, 50u, 0u, &height));
     CHECK(near((int32_t) height, 20, 1));
 
-    // A negative input (the other wheel, or a flipped axis) is the same.
+    // A negative input counts by its size (hump_update uses |tilt|).
     CHECK(1u == run_hump(&hump, -12000, 20u, 0u, 0u, &height));
     CHECK(near((int32_t) height, 20, 1));
 
@@ -619,8 +619,9 @@ test_obs_profile (void)
  *
  * @par
  * A real sonar beam (about 15 degrees each side) still hears a 100 mm box
- * 250 mm ahead out to 65 and 115 degrees.  Uncorrected that reads about
- * 210 mm; the default correction brings it near the true 100 mm.
+ * 250 mm ahead out to 65 and 115 degrees.  Taken from the hit angles alone
+ * that is over 200 mm wide; the range limit keeps it near the true 100 mm
+ * with or without the default beam correction.
  */
 static void
 test_obs_beam (void)
@@ -649,9 +650,8 @@ test_obs_beam (void)
 
     // Casts: enumeration value and small constants, all exact.
     CHECK(tune_set((uint32_t) TUNE_OBS_BEAM_DEG, 0));
-    // From the angle alone it read about 215 mm (capped at
-    // OBSTACLE_MAX_WIDTH_MM).  The range limit (2026-11-24) puts each edge
-    // at the corner's range, so it is near the true 100 mm even uncorrected.
+    // With no beam correction, the range limit puts each edge at the
+    // corner's range, so the width is still near the true 100 mm.
     obs_profile_compute(spread, used, &profile);
     CHECK(near((int32_t) profile.width_mm, 100, 15));  // Cast: < 2^16.
 
@@ -676,10 +676,9 @@ test_obs_beam (void)
     obs_profile_compute(spread, used, &profile);
     CHECK(near((int32_t) profile.width_mm, 100, 40));  // Cast: < 2^16.
 
-    // A 150 mm box only 100 mm ahead (the closer stop, 2026-11-24): its
-    // corners are 125 mm away at 53 and 127 degrees, and the 15-degree cone
-    // still hears them out to 40 and 140 degrees.  The face in between
-    // reads 100 / sin(angle).
+    // A 150 mm box only 100 mm ahead: its corners are 125 mm away at 53 and
+    // 127 degrees, and the 15-degree cone still hears them out to 40 and
+    // 140 degrees.  The face in between reads 100 / sin(angle).
     used = 0u;
 
     for (uint32_t angle = 20u; angle <= 160u; angle += 5u)
@@ -706,7 +705,7 @@ test_obs_beam (void)
 
 
 /*!
- * @brief tlm_codec: frame sizes and command validation.
+ * @brief tlm_codec: frame sizes and command validation; tune ranges.
  */
 static void
 test_tlm_codec (void)
@@ -753,7 +752,8 @@ test_tlm_codec (void)
     CHECK(TLM_CMD_INVALID == tlm_codec_parse_command(start, 1u, &word));
     CHECK(TLM_CMD_INVALID == tlm_codec_parse_command(map_set, 2u, &word));
 
-    // TUNE: setting 7 (encoder edge) = 5105, and setting 6 (steering) = -1.
+    // TUNE: setting 7 (encoder edge) = 5105, and setting 6 (steering
+    // direction) = -1.
     CHECK(TLM_CMD_TUNE == tlm_codec_parse_command(tune_edge, 4u, &word));
     CHECK(7u == bitpack_word_get(word, TLM_CMD_PARAM_SHIFT,
                                  TLM_CMD_PARAM_WIDTH));
@@ -805,7 +805,7 @@ test_nav_map (void)
     CHECK(NAV_ACTION_RIGHT == nav_map_get(&map, 25u));
     CHECK(1u == nav_map_version(&map));
 
-    // A new version replaces the whole map: Q and Z no longer turn.
+    // A new version replaces the whole map: Q and Z go straight again.
     CHECK(nav_map_set(&map, 0u, NAV_ACTION_LEFT, 2u));         // A.
     CHECK(NAV_ACTION_LEFT == nav_map_get(&map, 0u));
     CHECK(NAV_ACTION_STRAIGHT == nav_map_get(&map, 16u));

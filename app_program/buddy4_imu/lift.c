@@ -66,7 +66,7 @@ lift_update (lift_t * p_lift, int32_t tilt_mdeg, bool b_valid,
 
         if (b_valid)
         {
-            // Level again: ready to report the next lift.
+            // Below the threshold: ready to report the next lift.
             p_lift->b_lifted = false;
         }
     }

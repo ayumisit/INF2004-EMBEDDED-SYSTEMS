@@ -1,11 +1,12 @@
 /** @file lsm303_hw.h
  *
- * @brief LSM303DLHC accelerometer and magnetometer on I2C0 (GP0 SDA,
- *        GP1 SCL).
+ * @brief LSM303DLHC or LSM303D accelerometer and magnetometer on I2C0
+ *        (GP0 SDA, GP1 SCL).
  *
  * @par
  * Owner: Buddy 4.  Only the IMU Task may call these functions (Week 6:
- * "Only IMU acquires this sensor").  The sensor has no gyroscope.
+ * "Only IMU acquires this sensor"); the BUDDY_TEST=4 bench test also calls
+ * them, but it runs instead of the IMU Task.  The sensor has no gyroscope.
  *
  * @par
  * COPYRIGHT NOTICE: (c) 2026 AAI03 team, INF2004.  All rights reserved.

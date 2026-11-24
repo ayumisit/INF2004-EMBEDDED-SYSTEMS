@@ -21,6 +21,7 @@ root are in `app_program/platform/robot_cfg.h` (`MQTT_BROKER_PORT`,
 | `inf2004/aai03/evt` | robot to PC | EVENT (type 2) | on event |
 | `inf2004/aai03/sum` | robot to PC | SUMMARY (type 3) | on request and at mission end |
 | `inf2004/aai03/ack` | robot to PC | ACK (type 4) | per command received |
+| `inf2004/aai03/dbg` | robot to PC | line-following record chunks (`DEBUG_MON=1` builds) | after a run |
 | `inf2004/aai03/cmd` | PC to robot | COMMAND (type 8) | as needed |
 
 ## Frames sent by the robot
@@ -46,7 +47,7 @@ binary frame is 36 bytes.
 | ODOMETRY | 16 | distance cm 16 (wrapping) | Buddy 2 |
 | LINE | 32 | offset 11 (excess-1024), centre ADC 12, left black 1, state 3, timestamp 5 | Buddy 3 |
 | BARCODE | 27 | letter 5, reversed 1, seq 2, reads 8, rejects 8, state 3 | Buddy 3 |
-| IMU | 27 | pitch 8 (0.5 degree units, excess-128), heading 9, motion class 3, hump state 2, valid 1, impacts 4 | Buddy 4 |
+| IMU | 27 | tilt 8 (pitch and roll combined, 0.5 degree units, excess-128), heading 9, motion class 3, hump state 2, valid 1, impacts 4 | Buddy 4 |
 | HUMP | 22 | last hump mm 8, highest hump mm 8, count 6 | Buddy 4 |
 | OBSTACLE | 24 | front distance cm 8 (255 = nothing), state 3, last plan 3, profiles 6, echo faults 4 | Buddy 5 |
 | COMMS | 19 | link state 3, reconnections 8, dropped messages 8 | Buddy 1 |
@@ -62,7 +63,7 @@ owners' headers and in `tools/tlm_decode.py`.
 | 0 | BARCODE | letter 5 (0 = A), reversed 1, seq 2 |
 | 1 | DECODE_FAIL | reason 3 (overflow, count, ratio, no match, frame, start), elements 6 |
 | 2 | HUMP | height mm 8, highest mm 8 |
-| 3 | IMPACT | peak acceleration in 16 mg units 8 |
+| 3 | IMPACT | departure of the total acceleration from 1 g, in 16 mg units 8 |
 | 4 | OBSTACLE | distance cm 8 |
 | 5 | PROFILE | plan 3, width cm 8, distance cm 8 |
 | 6 | STATE | new state 4, previous state 4 |
@@ -82,10 +83,10 @@ Fault mask bits: 0 motor stall, 1 encoder, 2 IMU, 3 no echo, 4 WiFi loss,
 |---|---|---|
 | `start` | `18 00` | READY to run (same as the START button) |
 | `stop` | `18 01` | End the run: MISSION_COMPLETE and a summary |
-| `reset` | `18 02` | SAFE_STOP or MISSION_COMPLETE back to READY |
+| `reset` | `18 02` | Any stopped state (also INITIALISING, ending its settle early) back to READY |
 | `summary` | `18 03` | Publish a SUMMARY frame |
 | `map` | `18 v4 xx` | Set the action of one barcode letter (FR10) |
-| `tune` | `18 s5 lo hi` | Change a setting live (s = setting id, value signed 16-bit little-endian). Lost on reset |
+| `tune` | `18 s5 lo hi` | Change a setting live (s = setting id, value signed 16-bit little-endian). Lost at power-off or reboot, not on `reset` |
 | `scan` | `18 06` | Profile the obstacle in front now (only while not on a run); the result is a PROFILE event |
 
 `map` layout: byte 1 is `0x04 | (version << 4)`; byte 2 is
@@ -100,16 +101,18 @@ straight first.  Send the four letters of one map with the same version
 (the dashboard's M key does this).
 
 Every command is acknowledged on `ack` when it is received (accepted 1, or 0
-if malformed).  A map update is acknowledged a second time, by the MAP_ACK
-event, once Vehicle Control has applied it; the new map applies from the next
-barcode decoded, never to a command already latched for the coming junction.
+if malformed, out of range or not delivered).  A map update is acknowledged a
+second time, by the MAP_ACK event, once Vehicle Control has applied it; the
+new map applies from the next barcode decoded, never to a command already
+latched for the coming junction.
 
 ## Live tuning
 
 `python3 tools/tlm_decode.py tune <setting> <value> --broker <ip>` changes a
 setting while the robot runs.  The robot acknowledges on `ack` (accepted 0
 if the value is out of range) and reports the new value as a TUNE event.
-Changes are lost on reset: copy good values into `platform/robot_cfg.h`.
+Changes are lost at power-off or reboot (the `reset` command keeps them):
+copy good values into `platform/robot_cfg.h`.
 
 | Id | Setting | Range | Starts at (robot_cfg.h) |
 |---|---|---|---|
@@ -120,7 +123,7 @@ Changes are lost on reset: copy good values into `platform/robot_cfg.h`.
 | 4 | `steer_kp` | 0..3000 milli | `STEER_KP_MILLI` |
 | 5 | `steer_kd` | 0..3000 milli | `STEER_KD_MILLI` |
 | 6 | `steer_dir` | -1 or 1 | `STEER_DIRECTION` |
-| 7 | `enc_um_per_edge` | 500..30000 um | `ENC_UM_PER_EDGE` |
+| 7 | `enc_um_per_edge` | 50..30000 um | `ENC_UM_PER_EDGE` |
 | 8 | `track_mm` | 50..300 mm (turn angle) | `TRACK_WIDTH_MM` |
 | 9 | `reverse_mm` | 0..500 mm | `REVERSE_DISTANCE_MM` |
 | 10 | `turn_right_pct` | 50..150 % of the angle asked for | `TURN_RIGHT_PERCENT` |

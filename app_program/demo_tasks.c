@@ -20,7 +20,7 @@
 /*
  * Blink task: liveness independent of the console, and -- since USB does not
  * enumerate and therefore cannot report on itself -- a readout of how far USB
- * bring-up gets, using the long/short count encoding from Phase 0.
+ * bring-up gets, as a count of long (5) and short (1) flashes.
  *
  *	0  (dark)  tusb_init() failed
  *	1          tk_def_int() rejected the USB interrupt

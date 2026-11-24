@@ -1,7 +1,7 @@
 /** @file lift.h
  *
  * @brief Lift detector: reports when the robot is picked up off the floor
- *        (Buddy 4, IMU requirement added in Week 12).
+ *        (Buddy 4, Week 12 IMU requirement).
  *
  * @par
  * Pure module (no kernel or hardware dependency), unit-tested on the host.
@@ -11,8 +11,9 @@
  * persist for the hold time, so a single jolt is never a lift.
  *
  * @par
- * One lift is reported once.  The detector re-arms when the lean has gone,
- * so putting the robot down and lifting it again reports again.
+ * One lift is reported once.  The detector re-arms on the first valid
+ * sample whose lean is below the current threshold, so putting the robot
+ * down and lifting it again reports again.
  *
  * @par
  * COPYRIGHT NOTICE: (c) 2026 AAI03 team, INF2004.  All rights reserved.

@@ -3,14 +3,18 @@
  * @brief Buddy 3 stand-alone bench test: IR sensors, line state, barcodes.
  *
  * @par
- * Built only with BUDDY_TEST=3 (see app_main.c).  It exercises the real
- * Buddy 3 code, not a copy: the Line Following and Barcode tasks run exactly
- * as on the mission, and this low-priority task only watches them.
+ * Started only with BUDDY_TEST=3 (see app_main.c); the BUDDY_TEST=23 test
+ * also calls buddy3_test_calibrate() and buddy3_test_report_events().  It
+ * exercises the real Buddy 3 code, not a copy: the Line Following and
+ * Barcode tasks run exactly as on the mission.  This low-priority task
+ * stands in for Vehicle Control (calibration, junction release) and prints
+ * what they report.
  *
  * @par
- * Sequence: wait for the serial monitor, print the pin map, run a 5 s
- * calibration sweep, then every 0.5 s print the IR readings and line state,
- * and print every barcode letter and decode failure as soon as it happens.
+ * Sequence: pause 4 s so a serial monitor can be opened, print the pin
+ * map, run a 5 s calibration sweep, then every 0.5 s print the IR readings
+ * and line state, and print every barcode letter and decode failure as
+ * soon as it happens.
  * Vehicle Control is not running, so this task also releases a JUNCTION hold
  * that Vehicle Control would normally release.
  *
@@ -33,7 +37,7 @@
 #include "telemetry.h"
 #include "buddy3_test.h"
 
-// Time to open the serial monitor after the USB port appears.
+// Pause at start-up so a serial monitor can be opened before printing.
 #define BOOT_DELAY_MS           4000u
 
 // Calibration sweep: length, and how often the centre reading is sampled.
@@ -46,7 +50,8 @@
 #define LOOP_STEP_MS            50u
 #define REPORT_STEPS            10u
 
-// The barcode FIFO and the event buffer hold far fewer than this.
+// Most messages taken from each buffer per call, so a flood cannot stall
+// the loop.
 #define DRAIN_LIMIT             16u
 
 #define BITS_PER_BYTE           8u
@@ -232,7 +237,7 @@ drain_barcodes (void)
                                                        BARCODE_REVERSED_SHIFT,
                                                        1u);
 
-            // The letter is below 26, so LETTER_A + letter is printable.
+            // A letter below 26 prints as 'A'..'Z', anything else as '?'.
             // (UB *): string literals to the monitor API's character type.
             (void) tm_printf((UB *) ">>> BARCODE '%c'%s\n",
                              (letter < LETTER_COUNT) ?

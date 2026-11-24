@@ -84,7 +84,8 @@ static char const         g_will_msg[]      = { LWT_OFFLINE_FRAME, 0 };
 static uint8_t const      g_ssid[]          = UTK_WIFI_SSID;
 static uint8_t const      g_password[]      = UTK_WIFI_PASSWORD;
 
-// All of the state below is used only inside the radio-owner task.
+// Once comms_net_start() has registered the poll, the state below is used
+// only inside the radio-owner task.
 static mqtt_client_t *    gp_client         = NULL;
 static net_state_t        g_state           = NET_WAIT_WIFI;
 static uint32_t           g_state_ms        = 0u;

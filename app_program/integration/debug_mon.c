@@ -1,11 +1,12 @@
 /** @file debug_mon.c
  *
- * @brief USB console monitor for the full mission (no MQTT needed).
+ * @brief USB console monitor for the full mission (MQTT not required).
  *
  * @par
- * Reads only the sys_status words and the fault flag, so it cannot change
- * what the robot does.  Runs at the telemetry priority (the lowest), so it
- * never delays a control task.
+ * Reads status words, fault flags and diagnostic counters and queues the
+ * line-following record for MQTT; it never commands a task, so it cannot
+ * change what the robot does.  Runs at the telemetry priority,
+ * below every control and sensing task, so it never delays one.
  *
  * @par
  * COPYRIGHT NOTICE: (c) 2026 AAI03 team, INF2004.  All rights reserved.
@@ -38,9 +39,9 @@
 // Poll step, and how many steps between full status lines (1 s).
 #define LOOP_STEP_MS            50u
 #define REPORT_STEPS            20u
-#define DUMP_STEPS              300u    // DIAGNOSTIC: every 15 s when idle.
-#define SEND_EVERY_STEPS        2u      // DIAGNOSTIC: one chunk per 100 ms.
-#define SEND_PASSES             3u      // DIAGNOSTIC: times it is repeated.
+#define DUMP_STEPS              300u    // Every 15 s when idle.
+#define SEND_EVERY_STEPS        2u      // One chunk per 100 ms.
+#define SEND_PASSES             3u      // Times the record is sent.
 #define SEND_HEADER_BYTES       4u
 #define SEND_SAMPLES            2u
 #define SEND_BYTES              (SEND_HEADER_BYTES +                        \
@@ -136,7 +137,8 @@ debug_mon_start (void)
 static void
 debug_mon_task (INT start_code, void * p_ext_info)
 {
-    // Out-of-range values make the first pass report everything.
+    // 99 is no state, so the first pass reports both states; the counters
+    // and faults start at 0 and are reported once non-zero.
     debug_mon_seen_t seen = { 99u, 0u, 0u, 0u, 0u, 0u, 99u };
     uint32_t         step = 0u;
     uint32_t         dump_step = 0u;
@@ -181,7 +183,7 @@ debug_mon_task (INT start_code, void * p_ext_info)
 
 
 /*!
- * @brief DIAGNOSTIC BUILD ONLY: send the line-following record over MQTT.
+ * @brief Send the line-following record over MQTT.
  *
  * @par
  * Called every monitor step.  While the robot is not line following, the
@@ -234,6 +236,7 @@ send_record (void)
         chunk[3] = (uint8_t) ((s_index >> BYTE_BITS) & BYTE_MASK);  // Byte.
 
         {
+            // Cast: the samples are copied into the payload as raw bytes.
             uint8_t const * const p_bytes = (uint8_t const *) rec;  // Raw.
 
             for (uint32_t idx = 0u; idx < sizeof(rec); idx++)
@@ -242,7 +245,7 @@ send_record (void)
             }
         }
 
-        // A dropped chunk is sent again on a later pass.
+        // A chunk dropped before the last pass is sent again later.
         (void) comms_queue(TLM_TOPIC_DEBUG, chunk, sizeof(chunk));
 
         s_index += SEND_SAMPLES;
@@ -257,7 +260,7 @@ send_record (void)
 
 
 /*!
- * @brief DIAGNOSTIC BUILD ONLY: print the line-following record.
+ * @brief Print the line-following record.
  */
 static void
 dump_record (void)
@@ -441,8 +444,8 @@ print_status (void)
                                                  IMU_PITCH_WIDTH),
                                 IMU_PITCH_WIDTH);
 
-    // (UB *): string literal to the monitor API's character type.  Pitch
-    // is in half degrees; the speeds are excess-1024 fields.
+    // (UB *): string literal to the monitor API's character type.  The
+    // tilt field is in half degrees; the speeds are excess-1024 fields.
     (void) tm_printf((UB *) "line %-9s c%4lu off%5ld | motor %-9s "
                      "L%4ld R%4ld | tilt %3ld hdg %3lu | front ",
                      name_of(gp_line_names, 5u,

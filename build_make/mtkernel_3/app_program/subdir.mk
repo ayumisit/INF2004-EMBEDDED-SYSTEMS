@@ -7,8 +7,9 @@
 # headers and the Pico SDK hardware headers define the same peripheral base
 # address macros and cannot share a translation unit:
 #
-#   *_hw.c, *_net.c   Hardware / network driver modules.  Include only Pico
-#                     SDK (or lwIP / cyw43) headers, never <tk/tkernel.h>.
+#   *_hw.c, *_net.c   Hardware / network driver modules.  Include Pico SDK
+#                     (or lwIP / cyw43) headers and plain-C application
+#                     headers, never <tk/tkernel.h>.
 #                     Built as gnu11 because the SDK uses C11 static_assert.
 #   everything else   Kernel-side modules.  Include <tk/tkernel.h> and the
 #                     plain-C driver headers, never an SDK header.  Built as
@@ -21,7 +22,7 @@ APP_ROOT     := ../app_program
 APP_SUBDIRS  := platform buddy1_comms buddy2_motion buddy3_line \
                 buddy4_imu buddy5_obstacle integration
 
-# demo_tasks.c is the kernel demo left over from the port: not part of the robot.
+# demo_tasks.c, the port's kernel demo, is not part of the robot.
 APP_SRCS     := $(filter-out $(APP_ROOT)/demo_tasks.c,$(wildcard $(APP_ROOT)/*.c)) \
                 $(foreach dir,$(APP_SUBDIRS),$(wildcard $(APP_ROOT)/$(dir)/*.c))
 APP_HW_SRCS  := $(filter %_hw.c %_net.c,$(APP_SRCS))
@@ -47,11 +48,14 @@ APP_KERNEL_INCLUDES := $(subst -I,-isystem ,$(INCPATH))
 APP_WARNINGS := -Wall -Wextra -Werror -Wshadow -Wsign-compare -Wsign-conversion \
                 -Wstrict-prototypes -Wmissing-prototypes
 
-# Bench tests (BUDDY_TEST=3 Buddy 3 alone, 23 Buddy 2 + 3; 0 is the mission),
-# the USB console monitor for the mission (DEBUG_MON=1), and BENCH_NO_IMU=1,
-# which lets the mission start with a dead IMU (bench use only).
+# Bench tests (BUDDY_TEST=2 Buddy 2 alone, 3 Buddy 3 alone, 4 the Buddy 4
+# IMU diagnostic, 23 Buddy 2 + 3; 0 is the mission), the USB console
+# monitor for the mission (DEBUG_MON=1), and BENCH_NO_IMU=1, which lets the
+# mission start with a dead IMU (bench use only).
 # The stamp file name carries the values, and the recipe deletes the other
-# stamps, so the files that read them are rebuilt whenever a value changes.
+# stamps, so app_main.c and vehicle.c are rebuilt when a value changes.
+# NOTE: barcode.c also reads DEBUG_MON but is not rebuilt: run make clean
+# after changing DEBUG_MON.
 BUDDY_TEST   ?= 0
 DEBUG_MON    ?= 0
 BENCH_NO_IMU ?= 0
