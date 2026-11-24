@@ -944,5 +944,5 @@ sign_of (int32_t value)
     return (sign);
 }
 
-
 /*** end of file ***/
+
