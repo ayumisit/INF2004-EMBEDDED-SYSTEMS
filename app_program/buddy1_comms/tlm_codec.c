@@ -78,7 +78,8 @@ tlm_codec_telemetry (uint32_t seq, uint32_t const * p_words, uint8_t * p_out,
  * @brief Build a HEARTBEAT frame.
  *
  * @param[in]  seq       Frame sequence number.
- * @param[in]  uptime_s  Seconds since boot (low 16 bits).
+ * @param[in]  uptime_s  Seconds of Telemetry Task periods since start-up
+ *                       (low 16 bits).
  * @param[in]  state     Vehicle Control state.
  * @param[in]  faults    Fault bitmask.
  * @param[out] p_out     Output buffer.
@@ -166,7 +167,7 @@ tlm_codec_summary (tlm_codec_summary_t const * p_summary, uint8_t * p_out,
  * @brief Build an ACK frame (command received, accepted or refused).
  *
  * @param[in]  command     Command type field of the received command.
- * @param[in]  b_accepted  true if the command was valid.
+ * @param[in]  b_accepted  true if the command was valid and delivered.
  * @param[out] p_out       Output buffer.
  * @param[in]  capacity    Output buffer size.
  *
@@ -191,10 +192,12 @@ tlm_codec_ack (uint32_t command, bool b_accepted, uint8_t * p_out,
  *
  * @param[in]  p_in    Payload bytes.
  * @param[in]  length  Payload length.
- * @param[out] p_word  Command word for mbf_ctrl_cmd (valid commands only).
+ * @param[out] p_word  Command word for mbf_ctrl_cmd; written whenever the
+ *                     payload has 2 or more bytes and a valid header byte,
+ *                     even for an invalid command.
  *
  * @return The command type, or TLM_CMD_INVALID for a malformed payload
- *         (wrong length, frame type, version, command, letter or action).
+ *         (wrong length, frame type, version, command or letter).
  */
 tlm_codec_cmd_t
 tlm_codec_parse_command (uint8_t const * p_in, uint32_t length,

@@ -5,8 +5,10 @@
  *        (Week 6 "enc_state").
  *
  * @par
- * Owner: Buddy 2 (Motion Control).  Readers: Motion Control, IMU (distance
- * for hump height), Telemetry.
+ * Owner: Buddy 2 (Motion Control).  Readers of enc_state: Motion Control,
+ * IMU (wheel speeds, to classify motion and spot steady line following)
+ * and Vehicle Control.  Telemetry sends both status words and also puts
+ * ODOMETRY in the run summary.
  *
  * @par
  * Status words written (sys_status, LSB first):

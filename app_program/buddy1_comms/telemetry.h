@@ -15,7 +15,8 @@
  *   BARCODE      [4:0] letter 0=A..25=Z, [5] reversed, [7:6] sequence
  *   DECODE_FAIL  [2:0] reason (barcode_reject_t), [8:3] element count
  *   HUMP         [7:0] hump height mm, [15:8] running maximum mm
- *   IMPACT       [7:0] peak acceleration in units of 16 mg
+ *   IMPACT       [7:0] departure from 1 g in units of 16 mg (first sample
+ *                over the threshold)
  *   OBSTACLE     [7:0] distance cm
  *   PROFILE      [2:0] plan, [10:3] width cm, [18:11] distance cm
  *   STATE        [3:0] new vehicle state, [7:4] previous state
@@ -23,6 +24,8 @@
  *   JUNCTION     [1:0] action executed
  *   MAP_ACK      [4:0] letter, [6:5] action, [10:7] map version, [11] ok
  *   LINE         [0] 1 = line lost, 0 = line found
+ *   TUNE         [3:0] setting id, [19:4] value (excess-32768)
+ *   LIFT         no data (0)
  *
  * @par
  * HEALTH status word (owned by this task, LSB first): [7:0] missed periods

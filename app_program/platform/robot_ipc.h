@@ -5,10 +5,11 @@
  *
  * @par
  * Event flags:  flg_vehicle_evt (events into Vehicle Control), flg_fault
- * (the shared fault bitmask of Change Requirement 1), flg_comm (link and
- * summary requests into Telemetry) and flg_obstacle (SCAN_REQ).  Setting and
- * clearing bits goes through tk_set_flg/tk_clr_flg, which the kernel performs
- * atomically, so no task ever does a read-modify-write on a shared bitmask.
+ * (the shared fault bitmask of Change Requirement 1), flg_comm (summary
+ * requests into Telemetry; the link up/down bits Communication sets are not
+ * read) and flg_obstacle (SCAN_REQ).  Setting and clearing bits goes through
+ * tk_set_flg/tk_clr_flg, which the kernel performs atomically, so no task
+ * ever does a read-modify-write on a shared bitmask.
  *
  * @par
  * Message buffers:  mbf_nav_cmd, mbf_obs_profile, mbf_ctrl_cmd,
@@ -18,8 +19,9 @@
  *
  * @par
  * Kernel object IDs never leave this module; subsystems use the functions
- * below.  A failed kernel call is counted (robot_ipc_error_count) rather than
- * ignored.
+ * below.  A failed kernel call after start-up is counted
+ * (robot_ipc_error_count) rather than ignored; robot_ipc_create() returns
+ * its error instead, and timeouts are not counted.
  *
  * @par
  * COPYRIGHT NOTICE: (c) 2026 AAI03 team, INF2004.  All rights reserved.

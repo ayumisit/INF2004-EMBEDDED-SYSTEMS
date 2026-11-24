@@ -121,7 +121,8 @@ hump_height_mm (hump_t const * p_hump, int32_t tilt_mdeg)
     int32_t const sine = fix_math_sin_q15(fix_math_abs(tilt_mdeg));
 
     // The lever is below 2^10 mm and |sine| at most 2^15, so the product
-    // fits; sin of 0..90 degrees is never negative, so the cast is exact.
+    // fits; a hump peak is far below 180 degrees, so the sine and the
+    // result are not negative and the cast is exact.
     return ((uint32_t) (((int32_t) p_hump->lever_mm * sine) /
                         FIX_MATH_Q15_ONE));
 }

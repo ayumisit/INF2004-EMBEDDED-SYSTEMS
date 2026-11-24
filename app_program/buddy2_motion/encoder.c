@@ -6,9 +6,9 @@
  * The interrupt handler only counts edges and timestamps them.  The Encoder
  * Task runs every 10 ms, copies the interrupt data inside a short critical
  * section, converts it to speed and distance, and publishes the result under
- * the enc_state mutex.  Speed comes from the interval between the last two
- * edges rather than from edges per period, because at 200 mm/s fewer than
- * one edge arrives in 10 ms.
+ * the enc_state mutex.  Speed is the change in edge count over the last
+ * SPEED_WINDOW periods divided by the time those periods took, which stays
+ * smooth when one period holds only a few edges.
  *
  * @par
  * COPYRIGHT NOTICE: (c) 2026 AAI03 team, INF2004.  All rights reserved.
@@ -38,8 +38,8 @@
 #define SPEED_WINDOW            5u      // Periods the speed is averaged over.
 
 // Edge length, tunable live (TUNE_ENC_UM_PER_EDGE, 50..30000 um).
-// NOTE: the signed distance product overflows after about 200 m of travel
-// per wheel, far beyond one 5-minute run.
+// NOTE: the signed distance product overflows once the two wheels together
+// have travelled about 2 km (2^31 um), far beyond one 5-minute run.
 #define UM_PER_EDGE             (tune_get(TUNE_ENC_UM_PER_EDGE))
 
 /*!
@@ -230,10 +230,10 @@ encoder_task (INT start_code, void * p_ext_info)
  * @return Signed speed in mm/s; 0 if no edge arrived recently.
  *
  * @par
- * The count rate is used rather than the last edge interval: with motor
- * shaft encoders edges arrive every millisecond, two often share one
- * interrupt, and a single interval then reads half the true speed.  The
- * sign comes from the counted direction.
+ * The count rate is used rather than the last edge interval: at speed,
+ * two edges can share one interrupt (counted as 2 steps), and a single
+ * interval would then read half the true speed.  The sign comes from the
+ * counted direction.
  */
 static int32_t
 wheel_speed (uint32_t wheel, wheel_isr_t const * p_wheel, uint32_t now_us)
@@ -276,8 +276,8 @@ publish (encoder_state_t const * p_state)
     g_state = *p_state;
     robot_ipc_unlock(ROBOT_IPC_LOCK_ENC_STATE);
 
-    // Counts and distance are reported modulo 2^16 (the decoder unwraps
-    // them); the casts keep the low bits of the two's complement value.
+    // Counts and distance are sent modulo 2^16 (the decoder shows the raw
+    // 16-bit value); the casts keep the low bits of the two's complement value.
     counts   = bitpack_word_set(counts, ENCODER_LEFT_SHIFT,
                                 ENCODER_COUNT_WIDTH,
                                 (uint32_t) p_state->left_count);  // Low bits.
@@ -313,14 +313,18 @@ encoder_edge_isr (uint32_t pin, uint32_t edges, uint32_t time_us,
 
     if ((time_us - g_wheels[wheel].last_edge_us) < ENC_MIN_EDGE_US)
     {
-        // Too soon after the last edge to be a real slot: noise.  Ignore it
-        // so it neither counts nor shortens the measured period.
+        // Too soon after the last edge to be a real edge: noise.  Ignore it
+        // so it is not counted and does not move last_edge_us.
         steps = 0;
     }
     else if ((0u != (edges & GPIO_IRQ_EDGE_RISING)) &&
              (0u != (edges & GPIO_IRQ_EDGE_FALLING)))
     {
         steps = 2;
+    }
+    else
+    {
+        // A single edge: steps keeps its initial value of 1.
     }
 
     if (0u != ENC_QUADRATURE)

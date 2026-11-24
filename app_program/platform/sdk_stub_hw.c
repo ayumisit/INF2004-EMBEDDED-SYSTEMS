@@ -11,8 +11,9 @@
  *
  * @par
  * NOTE (Barr-C 6.1.i): clock_get_hz() and time_us_64() keep the names the
- * Pico SDK calls them by; they are the only public functions in the
- * application without a module prefix.
+ * Pico SDK calls them by.  With usermain(), which the kernel calls by that
+ * name, they are the only public functions in the application without a
+ * module prefix.
  *
  * @par
  * COPYRIGHT NOTICE: (c) 2026 AAI03 team, INF2004.  All rights reserved.

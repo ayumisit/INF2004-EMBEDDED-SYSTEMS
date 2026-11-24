@@ -12,9 +12,10 @@
  *
  * @par
  * The quiet zone that ends a capture is adaptive: at least BARCODE_QUIET_MS
- * and at least four times the widest element seen so far.  A Code 39 quiet
- * zone is at least ten narrow elements wide while a wide element is at most
- * three, so this does not split a barcode above about 45 mm/s.
+ * and at least four times the widest element seen so far.  A wide element
+ * is at most three narrow ones, so later elements never reach the limit;
+ * the first bar is timed against BARCODE_QUIET_MS alone, which sets the
+ * 45 mm/s slowest reading speed (robot_cfg.h).
  *
  * @par
  * COPYRIGHT NOTICE: (c) 2026 AAI03 team, INF2004.  All rights reserved.
@@ -114,7 +115,7 @@ static uint32_t volatile g_dbg_black  = 0u;
 
 #if (1 == DEBUG_MON)
 // Bench aid: the last eight seconds of darkness readings, printed with each
-// capture so the waveform can be replayed on a PC.
+// non-empty capture so the waveform can be replayed on a PC.
 #define TRACE_SAMPLES           16384u
 #define TRACE_DECIMATE          4u
 #define TRACE_PER_LINE          32u
@@ -178,7 +179,7 @@ barcode_start (void)
 
 #if BARCODE_SENSOR_ANALOGUE
     {
-        // The ADC itself was started by ir_hw_init() (Line Following).
+        // ir_hw_init() (Line Following) starts the ADC itself.
         T_DINT const dint =
         {
             .intatr = TA_HLNG,
@@ -300,7 +301,7 @@ barcode_task (INT start_code, void * p_ext_info)
 
         if (cap.b_early)
         {
-            // The command is out; now let the rest of the label pass.
+            // The command is sent; let the rest of the label pass.
             settle();
         }
 
@@ -311,7 +312,7 @@ barcode_task (INT start_code, void * p_ext_info)
 
 
 /*!
- * @brief Collect elements until a quiet zone passes with no edge.
+ * @brief Collect elements until they decode or a quiet zone passes.
  *
  * @param[out] p_capture  The finished capture.
  */
@@ -355,7 +356,7 @@ capture (capture_t * p_capture)
             quiet_ms = (widest * TICK_US * QUIET_FACTOR) / US_PER_MS;
         }
 
-        // quiet_ms is at most about 2.1 s, so the conversion is exact.
+        // quiet_ms is a few seconds at most, far inside TMO: exact.
         b_quiet = (E_TMOUT == tk_slp_tsk((TMO) quiet_ms));
     }
 
@@ -425,7 +426,9 @@ drain (capture_t * p_capture, bool b_first)
         }
         else
         {
-            // Too many elements for a single-letter frame.
+            // Too many elements for a single-letter frame: the extra ones are
+            // dropped.  capture() then replaces this flag with the ISR
+            // overflow test.
             p_capture->b_overflow = true;
         }
 
@@ -530,7 +533,7 @@ reject (barcode_reject_t reason, uint32_t count)
 
     // The enumeration value is below 8, so the cast is exact.
     data = bitpack_word_set(data, 0u, BARCODE_REJECT_REASON_WIDTH,
-                            (uint32_t) reason);  // Enum < 8.
+                            (uint32_t) reason);
     data = bitpack_word_set(data, BARCODE_REJECT_COUNT_SHIFT,
                             BARCODE_REJECT_COUNT_WIDTH,
                             bitpack_saturate(count,
@@ -628,8 +631,8 @@ dump_capture (capture_t const * p_capture)
     (void) tm_printf((UB *) "\n");
 
 #if BARCODE_SENSOR_ANALOGUE
-    // 2026-11-11: every capture, to see whether the blurred bars of the
-    // new barcode sensor still leave ripples in the signal (was >= 10).
+    // Every capture with at least one element prints the trace, so
+    // ripples left in the signal by blurred bars can be checked.
     if (p_capture->count >= 1u)
     {
         dump_trace();
@@ -750,11 +753,10 @@ barcode_adc_isr (UINT int_number)
  * noticed when the darkness climbs 1/2^BARCODE_ENTER_SHIFT of that contrast
  * above white and ends when it drops below BARCODE_SPLIT_PERCENT of the
  * bar's own height.  Both edges are then recorded at that level, the start
- * by looking back
- * through the recent samples, so a bar narrower than the sensor's spot,
- * which never reaches full black, is still measured at its true width and
- * the spaces beside it are not stretched.  With no contrast (plain surface)
- * no edges are produced at all.
+ * by looking back through the recent samples, so a bar narrower than the
+ * sensor's spot, which never reaches full black, is still measured at its
+ * true width and the spaces beside it are not stretched.  With no contrast
+ * (plain surface) no edges are produced at all.
  */
 static void
 on_sample (uint32_t raw, uint32_t time_us)
@@ -861,7 +863,8 @@ on_sample (uint32_t raw, uint32_t time_us)
  * @brief Record both edges of a bar that has just ended.
  *
  * @param[in,out] p_s      Edge finder state.
- * @param[in]     mid      Half-height level of the bar (darkness).
+ * @param[in]     mid      Split level of the bar (darkness), at
+ *                         BARCODE_SPLIT_PERCENT of its height.
  * @param[in]     time_us  Time of the sample that fell below it.
  *
  * @par
@@ -960,8 +963,8 @@ median3 (uint32_t a_val, uint32_t b_val, uint32_t c_val)
  * pulse shorter than the interrupt latency: comparator chatter at a blurred
  * bar edge, never a real bar.  If the pin is back at the colour last
  * recorded, the chatter is ignored; if it has changed, one clean edge is
- * recorded.  (2026-11-11: this used to count as an overflow, which rejected
- * captures that were otherwise complete.)
+ * recorded.  Chatter is not counted as an overflow, so it cannot reject a
+ * capture that is otherwise complete.
  */
 static void
 barcode_edge_isr (uint32_t pin, uint32_t edges, uint32_t time_us,

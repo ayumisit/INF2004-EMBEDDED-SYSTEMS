@@ -4,10 +4,11 @@
  *        link status.
  *
  * @par
- * Functions called from the radio-owner task (comms_take, comms_on_command,
- * comms_on_link) are the only writers of the link state and of the
- * SYS_STATUS_COMMS word.  The drop counter has two writers (Telemetry and
- * the radio task) and is updated with interrupts disabled.
+ * After comms_start(), comms_take() and comms_on_link(), both called only
+ * from the radio-owner task, are the only writers of the link state and of
+ * the SYS_STATUS_COMMS word.  The drop counter has several writers (every
+ * task that calls comms_queue, and the radio task) and is updated with
+ * interrupts disabled.
  *
  * @par
  * COPYRIGHT NOTICE: (c) 2026 AAI03 team, INF2004.  All rights reserved.
@@ -34,7 +35,7 @@
 #define BITS_PER_BYTE           8u
 #define TOPIC_BYTES             1u
 
-static uint32_t volatile g_dropped    = 0u;     // Telemetry and radio task.
+static uint32_t volatile g_dropped    = 0u;     // Several writers.
 static uint32_t          g_reconnects = 0u;     // Radio task only.
 static comms_link_t      g_link       = COMMS_LINK_WIFI_INIT;
 
@@ -75,8 +76,8 @@ comms_start (void)
  * @param[in] p_payload  Payload bytes.
  * @param[in] length     Payload length, at most TLM_CODEC_MAX_FRAME.
  *
- * @return true if queued; false if dropped (queue full, too long, or no
- *         network in this build).
+ * @return true if queued; false if dropped (queue full, empty or too long,
+ *         or no network in this build).
  */
 bool
 comms_queue (tlm_codec_topic_t topic, uint8_t const * p_payload,
@@ -117,7 +118,8 @@ comms_queue (tlm_codec_topic_t topic, uint8_t const * p_payload,
  * @param[out] p_payload  Payload bytes.
  * @param[in]  capacity   Size of p_payload, at least TLM_CODEC_MAX_FRAME.
  *
- * @return Payload length, or 0 if the queue is empty.
+ * @return Payload length, or 0 if the queue is empty (a message too long
+ *         for capacity is discarded uncounted).
  */
 uint32_t
 comms_take (uint32_t * p_topic, uint8_t * p_payload, uint32_t capacity)
@@ -155,9 +157,10 @@ comms_take (uint32_t * p_topic, uint8_t * p_payload, uint32_t capacity)
  * @return true if the command was valid and handed to its task.
  *
  * @par
- * The ACK reports receipt and validation only.  Vehicle Control reports
- * when a map update has actually been applied (MAP_ACK event), so
- * application is acknowledged separately from receipt (Version A, Buddy 1).
+ * The ACK reports receipt, validation and hand-over only (refused if the
+ * frame is invalid, the setting rejects the value or mbf_ctrl_cmd is full).
+ * Vehicle Control reports when a map update has actually been applied
+ * (MAP_ACK event), so application is acknowledged separately.
  */
 bool
 comms_on_command (uint8_t const * p_payload, uint32_t length,
@@ -292,7 +295,7 @@ route_command (tlm_codec_cmd_t command, uint32_t word)
                                   BYTE_MASK);
         }
 
-        // START, STOP, RESET and MAP_SET go to Vehicle Control.
+        // START, STOP, RESET, MAP_SET and SCAN go to Vehicle Control.
         b_routed = robot_ipc_send(ROBOT_IPC_MBF_CTRL_CMD, msg, sizeof(msg),
                                   ROBOT_IPC_POLL);
 

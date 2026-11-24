@@ -18,8 +18,8 @@
 #include <stdint.h>
 
 /*!
- * @brief Outcome of one measurement (Week 6: valid, unknown and fault are
- *        distinct; a missing return is not proof of a clear path).
+ * @brief Outcome of one measurement (Week 6: valid, no echo and fault
+ *        are distinct; only FAULT means the sensor did not respond).
  */
 typedef enum
 {

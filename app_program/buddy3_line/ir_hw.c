@@ -42,7 +42,7 @@ static bool level_means_black(bool b_level);
 
 
 /*!
- * @brief Configure the ADC input and the two digital IR inputs.
+ * @brief Configure the analogue and digital IR inputs.
  */
 void
 ir_hw_init (void)
@@ -66,7 +66,7 @@ ir_hw_init (void)
                   << ADC_DIV_INT_LSB;
     adc_fifo_setup(true, false, FIFO_PAIR, false, false);
     adc_fifo_drain();
-    adc_irq_set_enabled(true);  // The NVIC side is enabled by the kernel.
+    adc_irq_set_enabled(true);  // NVIC side: barcode_start().
     adc_run(true);
 #else
     gpio_init(PIN_IR_BARCODE_DO);
@@ -77,7 +77,7 @@ ir_hw_init (void)
 
 
 /*!
- * @brief One conversion of the centre sensor.
+ * @brief Latest conversion of the centre sensor.
  *
  * @return Raw 12-bit reading, 0 to 4095.
  */
@@ -139,7 +139,7 @@ ir_hw_is_barcode_black (void)
  * came from, but round robin alternates the two inputs and CS.AINSEL names
  * the input of the conversion now in progress, so the entries are assigned
  * by walking back from it.  If results were lost (FIFO overrun) that walk
- * is no longer reliable, so the FIFO is emptied and the batch dropped.
+ * cannot be trusted, so the FIFO is emptied and the batch dropped.
  */
 bool
 ir_hw_sampler_take (uint32_t * p_barcode_raw)

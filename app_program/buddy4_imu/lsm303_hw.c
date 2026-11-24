@@ -12,10 +12,11 @@
  *
  * @par
  * Some GY-511 boards carry an LSM303D instead (ST DocID023312): one device
- * at 0x1E (SA0 high) for both sensors, WHO_AM_I 0x49, little-endian
- * outputs.  Accelerometer: 100 Hz, +/-2 g, 0.061 mg per LSB.
+ * at 0x1D or 0x1E (SA0 low or high) for both sensors, WHO_AM_I 0x49,
+ * little-endian outputs.  Accelerometer: 100 Hz, +/-2 g, 0.061 mg per LSB.
  * Magnetometer: 25 Hz, high resolution, +/-4 gauss, continuous.  The chip
- * is detected in lsm303_hw_init() and both report in the same units.
+ * is detected in lsm303_hw_init().  Both chips give acceleration in mg;
+ * the magnetic field stays raw, which is enough for the atan2 heading.
  *
  * @par
  * Every transfer has a timeout so a disconnected or stuck sensor can never
@@ -74,12 +75,12 @@
 #define D_REG_CTRL7             0x26u
 #define D_REG_OUT_X_L_A         0x28u
 #define D_IDENTITY              0x49u
-// Reboot (reload the factory trimming) before every configuration.  Seen
-// 2026-11-17: after a battery-only power-on the accelerometer answered and
-// kept its settings but its readings never changed, and re-writing the
-// settings did not help.  BOOT reloads the chip's internal memory, the
-// nearest thing to a power cycle that software can do (DocID023312 CTRL0;
-// DLHC: DocID018771 CTRL_REG5_A).
+// Reboot (reload the factory trimming) before every configuration.  After
+// a battery-only power-on the accelerometer can answer and keep its
+// settings while its readings never change, and re-writing the settings
+// does not help.  BOOT reloads the chip's internal memory, the nearest
+// thing to a power cycle that software can do (DocID023312 CTRL0; DLHC:
+// DocID018771 CTRL_REG5_A).
 #define D_REG_CTRL0             0x1Fu
 #define D_CTRL0_BOOT            0x80u
 #define REG_CTRL5_A             0x24u
@@ -417,23 +418,23 @@ recover_bus (void)
  *
  * @par
  * See BOOT_WAIT_US.  A failed write is not an error here: the
- * configuration that follows is checked and fails on its own.  The wait
+ * configuration that follows fails too if the bus is down.  The wait
  * runs in the IMU Task, below the motion and line tasks in priority.
  */
 static void
 reboot_chip (uint8_t address, uint8_t reg, uint8_t boot_bit)
 {
-    // The (void) discards the result: the configuration after this is
-    // checked, so a lost reboot shows up there.
+    // The (void) discards the result: a failed reboot is not retried.  A
+    // dead bus also fails the configuration writes that follow.
     (void) write_register(address, reg, boot_bit);
     wait_us(BOOT_WAIT_US);
 }
 
 
 /*!
- * @brief Busy-wait for a few microseconds.
+ * @brief Busy-wait for a short delay.
  *
- * @param[in] delay_us  Microseconds.
+ * @param[in] delay_us  Microseconds, at most BOOT_WAIT_US.
  */
 static void
 wait_us (uint32_t delay_us)
@@ -442,7 +443,7 @@ wait_us (uint32_t delay_us)
 
     while ((time_us_32() - start_us) < delay_us)
     {
-        // Spin: a few microseconds only.
+        // Spin: at most BOOT_WAIT_US (20 ms) in the IMU Task.
     }
 }
 

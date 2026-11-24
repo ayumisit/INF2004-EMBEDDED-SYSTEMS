@@ -3,15 +3,14 @@
  * @brief IMU Task: tilt, heading, motion class, humps and impacts.
  *
  * @par
- * The LSM303DLHC has no gyroscope, so pitch comes from the direction of
- * gravity (asin of the forward acceleration over the total), smoothed with
- * a first-order low-pass filter, and turn rate comes from the wheel speed
- * difference (FR15, assumption A6).  Roll comes the same way from the side
- * axis; the tilt (pitch and roll combined, never negative) drives the hump
- * detector, so a hump under either wheel is seen.  Heading is the level
- * magnetometer
- * angle; it is not tilt-compensated and the motors disturb it, which is why
- * it is reported but not used for control.
+ * The LSM303 (DLHC or D) has no gyroscope, so pitch comes from the
+ * direction of gravity (asin of the forward acceleration over the total),
+ * smoothed with a first-order low-pass filter, and turn rate comes from the
+ * wheel speed difference (FR15, assumption A6).  Roll comes the same way
+ * from the side axis; the tilt (pitch and roll combined, never negative)
+ * drives the hump detector, so a hump under either wheel is seen.  Heading
+ * is the level magnetometer angle; it is not tilt-compensated and the
+ * motors disturb it, which is why it is reported but not used for control.
  *
  * @par
  * Lift detection (Week 12 requirement): the same tilt feeds the lift
@@ -20,9 +19,12 @@
  *
  * @par
  * CALIBRATING averages IMU_CALIB_SAMPLES readings while the robot is still
- * to remove the mounting pitch and record 1 g.  Three consecutive I2C
- * failures enter SENSOR FAULT: the data is marked invalid, ROBOT_FAULT_IMU
- * is raised and the sensor is re-initialised once a second.
+ * to remove the mounting pitch and roll and record 1 g; level is learnt
+ * again whenever the robot sits still in READY.  IMU_FAULT_ERRORS
+ * consecutive accelerometer read failures, or an accelerometer whose
+ * readings have stopped changing, enter SENSOR FAULT: the data is marked
+ * invalid, ROBOT_FAULT_IMU is raised and the sensor is re-initialised once
+ * a second.
  *
  * @par
  * COPYRIGHT NOTICE: (c) 2026 AAI03 team, INF2004.  All rights reserved.
@@ -103,7 +105,7 @@ typedef struct
 
 static imu_ctx_t g_ctx;
 
-// Read by the USB monitor.  Each has one writer (the IMU task) and is one
+// Read by the USB monitor.  It has one writer (the IMU task) and is one
 // aligned word, so plain loads and stores are atomic.
 static uint32_t volatile g_lift_count   = 0u;
 static uint64_t  g_stack[STACK_MEDIUM / sizeof(uint64_t)];
@@ -180,10 +182,10 @@ imu_task (INT start_code, void * p_ext_info)
     (void) start_code;  // Unused: started with code 0.
     (void) p_ext_info;  // Unused: no extended information.
 
-    // Leave the chip alone while it starts up.  Seen 2026-11-17: after
-    // three of four power-ons from the battery alone the accelerometer
-    // gave the same reading for the whole session, and restarting it did
-    // not help; it never happened with the board already powered over USB.
+    // NOTE: Leave the chip alone while it starts up.  On a power-on from
+    // the battery alone, an accelerometer configured too early can give
+    // the same reading for the whole session, which re-writing its
+    // settings does not cure (see the BOOT reboot in lsm303_hw.c).
     robot_ipc_sleep_ms(IMU_START_DELAY_MS);
 
     for (;;)
@@ -221,12 +223,11 @@ imu_task (INT start_code, void * p_ext_info)
         encoder_get_state(&enc);
         classify(&enc);
 
-        // Turning, braking and pulling away tilt the IMU by themselves
-        // (11.5 and 17 degrees measured on 2026-11-04; 13.5 and 19.5 on
-        // 2026-11-17), which read as false humps.  A hump is only on the
-        // line, so samples count only in steady line following; all others
-        // abandon any hump, like invalid data.  So does a lift, so being
-        // picked up is never recorded as a hump.
+        // Turning, braking and pulling away tilt the IMU by up to about
+        // 20 degrees by themselves, which read as false humps.  A hump is
+        // only on the line, so samples count only in steady line following;
+        // all others abandon any hump, like invalid data.  So does a lift,
+        // so being picked up is never recorded as a hump.
         b_steady = is_following_steadily(&enc);
 
         // A lean no course hump can give, in steady following, is a lift.
@@ -254,8 +255,8 @@ sample (int32_t * p_accel)
 
     if (b_read && (is_frozen(p_accel)))
     {
-        // The chip answers but its readings never change: the
-        // accelerometer is switched off.  Start it again.
+        // The chip answers but its readings never change (see BOOT in
+        // lsm303_hw.c).  Start it again.
         g_ctx.frozen_count    = 0u;
         g_ctx.b_sensor_ok     = false;
         g_ctx.retry_countdown = PERIODS_PER_SECOND;
@@ -289,7 +290,8 @@ sample (int32_t * p_accel)
 
         if (g_ctx.calib_count < IMU_CALIB_SAMPLES)
         {
-            // CALIBRATING: the robot is held still in READY.
+            // CALIBRATING: at start-up Vehicle Control holds the robot
+            // still in INITIALISING; after a sensor fault it repeats here.
             g_ctx.calib_pitch_sum += pitch;
             g_ctx.calib_roll_sum  += roll;
             g_ctx.calib_mag_sum   += magnitude;
@@ -332,12 +334,12 @@ sample (int32_t * p_accel)
  * @param[in] magnitude  Acceleration magnitude of this sample, mg.
  *
  * @par
- * 2026-11-24: level was only learnt at power-on.  Powered on in a hand,
- * the robot later read 16.5 degrees sitting flat on the track, which is
- * over LIFT_TILT_STEADY_MDEG, so every run stopped as "picked up".  Now
- * every block of IMU_CALIB_SAMPLES samples taken in READY whose raw pitch
- * stays within IMU_RELEVEL_SPAN_MDEG (held still, not in a hand) replaces
- * the level, so the robot is level wherever it sat still before Start.
+ * A robot powered on in a hand learns a level that can be off by more than
+ * LIFT_TILT_STEADY_MDEG once it is set on the track, so every run would
+ * stop as picked up.  Every block of IMU_CALIB_SAMPLES samples taken in
+ * READY whose raw pitch stays within IMU_RELEVEL_SPAN_MDEG (held still, not
+ * in a hand) therefore replaces the level, so the robot is level wherever
+ * it sat still before Start.
  */
 static void
 relevel (int32_t pitch, int32_t roll, int32_t magnitude)
@@ -396,8 +398,8 @@ relevel (int32_t pitch, int32_t roll, int32_t magnitude)
  * @par
  * A working accelerometer has a few milli-g of noise on every axis, even
  * at rest, so three identical axes for a whole second means the data is
- * not being updated.  Seen 2026-11-17 after a power-on: the tilt stayed at
- * exactly zero, so neither a hump nor a lift could be detected.
+ * not being updated.  Frozen data holds the tilt constant (at zero if it
+ * froze before calibration), so no hump or lift can be detected.
  */
 static bool
 is_frozen (int32_t const * p_accel)
@@ -450,13 +452,14 @@ raw_angle (int32_t const * p_accel, uint32_t axis, int32_t magnitude)
  * @param[in] pitch_mdeg  Nose-up angle, bias removed.
  * @param[in] roll_mdeg   Side angle, bias removed.
  *
- * @return sqrt(pitch^2 + roll^2) in millidegrees, never negative.  Within
- *         1% of the true angle between the two gravity vectors up to 20
+ * @return sqrt(pitch^2 + roll^2) in millidegrees, never negative.  About
+ *         1% from the true angle between the two gravity vectors up to 20
  *         degrees, well beyond any course hump.
  *
  * @par
- * Both inputs are worked in 0.01-degree steps, so each square is below
- * 9000^2 and the sum stays far below 2^32.
+ * Both inputs are worked in 0.01-degree steps.  With the bias removed each
+ * lies within +/-180 degrees, so each square is below 2^29 and the sum
+ * stays below 2^30.
  */
 static int32_t
 combine_tilt (int32_t pitch_mdeg, int32_t roll_mdeg)
@@ -464,7 +467,7 @@ combine_tilt (int32_t pitch_mdeg, int32_t roll_mdeg)
     int32_t const pitch_cdeg = pitch_mdeg / MDEG_PER_CDEG;
     int32_t const roll_cdeg  = roll_mdeg / MDEG_PER_CDEG;
 
-    // Each square is non-negative and below 2^27: exact conversions.
+    // Each square is non-negative and below 2^29: exact conversions.
     uint32_t const sum_sq    = (uint32_t) (pitch_cdeg * pitch_cdeg) +
                                (uint32_t) (roll_cdeg * roll_cdeg);
 
@@ -492,7 +495,7 @@ check_impact (int32_t magnitude)
         g_ctx.cooldown_ms = (g_ctx.cooldown_ms > MS_PER_PERIOD) ?
                             (g_ctx.cooldown_ms - MS_PER_PERIOD) : 0u;
     }
-    else if (deviation > (int32_t) IMPACT_MG)  // 1500: exact conversion.
+    else if (deviation > (int32_t) IMPACT_MG)  // Small constant: exact.
     {
         // deviation is positive here, so the conversion is exact.
         uint32_t const peak = (uint32_t) (deviation / IMPACT_UNIT_MG);
@@ -653,10 +656,12 @@ track_lift (bool b_valid)
  *         the robot is not in a sharp turn.
  *
  * @par
- * The settle time covers the pull-away and the speed-up after a start, a
- * junction or a bypass.  A sharp turn is the same turn rate that classes
- * the motion as turning; after one, HUMP_AFTER_TURN_MS must pass before
- * the robot counts as steady again.
+ * The settle time covers the pull-away after a start, a junction or a
+ * bypass, and the speed-up that ends the slow start after a start or a
+ * junction (FOLLOW_SLOW_SHORT_MS).  After a bypass that speed-up comes at
+ * FOLLOW_SLOW_LONG_MS, after the settle time.  A sharp turn is the same
+ * turn rate that classes the motion as turning; after one,
+ * HUMP_AFTER_TURN_MS must pass before the robot counts as steady again.
  */
 static bool
 is_following_steadily (encoder_state_t const * p_enc)

@@ -15,10 +15,9 @@
 #include "tune.h"
 #include "obs_profile.h"
 
-// 2026-11-17 (build 8): 150 to 80.  The course obstacle is at most 200 mm
-// wide, so its edges are at most about 50 mm further than its closest
-// point; 150 let echoes from things behind it join the obstacle (widths up
-// to 430 mm were measured).
+// The course obstacle is at most 200 mm wide: centred ahead, its edges lie
+// about 25-50 mm beyond its closest point.  A larger depth lets echoes
+// from objects behind it join the profile.
 #define OBSTACLE_DEPTH_MM       80
 #define BYPASS_DEPTH_MM         400
 #define MDEG_PER_DEG            1000
@@ -391,12 +390,11 @@ find_extent (obs_profile_point_t const * p_points, uint32_t count,
  * @return sqrt(range^2 - face^2) in mm, 0 if the range is shorter.
  *
  * @par
- * 2026-11-24: the obstacle is no nearer than its closest point, so an echo
- * at range r lies at most sqrt(r^2 - face^2) to the side.  The sonar cone
- * keeps hearing a corner after the servo has turned past it, but always at
- * the corner's own range, so this places each edge where the corner is
- * whatever the beam width.  Every width was being read as 20 cm or more
- * (the OBSTACLE_MAX_WIDTH_MM cap) from the angle alone.
+ * The obstacle is no nearer than its closest point, so an echo at range r
+ * lies at most sqrt(r^2 - face^2) to the side.  The sonar cone keeps
+ * hearing a corner after the servo has turned past it, but always at the
+ * corner's own range, so this bound places each edge at the corner
+ * whatever the beam width.  The angle alone overstates the width.
  */
 static int32_t
 face_reach_mm (uint32_t range_mm, int32_t face_mm)
@@ -431,7 +429,8 @@ face_reach_mm (uint32_t range_mm, int32_t face_mm)
  * @par
  * The sonar beam is a cone, so it still hears the obstacle's edge after
  * the servo has turned past it.  Without this correction each edge, and so
- * the width, was placed too far out (OBS_BEAM_HALF_DEG).
+ * the width, would be placed too far out.  The default shift is
+ * OBS_BEAM_HALF_DEG.
  */
 static obs_profile_point_t
 beam_corrected (obs_profile_point_t const * p_point, uint32_t centre_deg)

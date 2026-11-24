@@ -58,7 +58,7 @@ packing, fixed-point maths, live settings, buzzer) and
 | Microcontroller | Raspberry Pi Pico W (RP2040 + CYW43439 Wi-Fi) |
 | Carrier board | Cytron Robo Pico (motor driver, servo headers, Grove ports, button, buzzer) |
 | Line / barcode sensors | 3 × TCRT5000 IR modules |
-| IMU | GY-511 (LSM303DLHC accelerometer + magnetometer) |
+| IMU | GY-511 carrying an LSM303D accelerometer + magnetometer (the driver also supports the LSM303DLHC) |
 | Distance sensor | HC-SR04 ultrasonic, on a scanning servo |
 | Drive | 2 × DC gear motors with wheel encoders |
 
@@ -67,7 +67,7 @@ matches that file.
 
 | Device | Signal | GPIO | Notes |
 |---|---|---|---|
-| LSM303DLHC (IMU) | SDA / SCL | GP0 / GP1 | I2C0, 400 kHz |
+| LSM303D (IMU) | SDA / SCL | GP0 / GP1 | I2C0, 400 kHz |
 | Left IR sensor | DO | GP3 | Digital. Its AO pin (GP2) is not ADC-capable and is left unused |
 | Centre IR sensor | AO | GP27 (ADC1) | Analogue, used for line offset |
 | Barcode IR sensor | DO | GP28 | Digital (`BARCODE_SENSOR_ANALOGUE 0u`); its AO is parked on GP7 |
@@ -115,8 +115,9 @@ OPEN_DASHBOARD.bat        Windows: start the broker and open the dashboard
 ### 4.1 Tasks
 
 Priority 1 is the highest. The port's USB-CDC service runs at 3 and the CYW43
-radio task at 4, so every control and sensing task runs above the network and
-Wi-Fi traffic can never delay control.
+radio task at 4. Vehicle Control, barcode, encoder, line, motion and
+obstacle tasks run above both, so Wi-Fi traffic cannot delay them. The IMU
+task runs at 5, below the radio.
 
 | Task | Owner | Priority | Released by | Stack |
 |---|---|---|---|---|
@@ -130,31 +131,39 @@ Wi-Fi traffic can never delay control.
 | Communication (CYW43 radio + MQTT poll) | port + Buddy 1 | 4 | Radio poll | |
 | IMU | Buddy 4 | 5 | Every 20 ms | 2 KiB |
 | Telemetry | Buddy 1 | 8 | Every 200 ms (5 Hz) | 2 KiB |
+| Debug monitor (`DEBUG_MON=1` only) | Integration | 8 | Every 50 ms | 2 KiB |
 | Buzzer | Platform | 9 | Polls cue requests | 1 KiB |
 
 Periodic tasks are released by a single 10 ms cyclic handler
 (`platform/period_tick.c`), so their periods do not drift. If a task overruns
 its period, the missed release is counted and reported in telemetry.
 
-All stacks and buffers are statically allocated; nothing uses the heap.
+All application stacks and buffers are statically allocated (`TA_USERBUF`);
+the robot code never uses the heap.
 
 ### 4.2 Inter-task communication
 
-Tasks never share variables directly. They use kernel objects created in
-`platform/robot_ipc.c`:
+Tasks share data only through kernel objects, most of them created in
+`platform/robot_ipc.c`, or through single-writer 32-bit words written with
+one atomic store:
 
-* **Event flags** carry events to Vehicle Control (line lost, junction,
-  obstacle, hump, lift, command received), faults, and scan requests.
-* **Message buffers** carry data: barcode actions, obstacle profiles, PC
+* **Event flags** carry events to Vehicle Control (line lost or found,
+  junction, obstacle, impact, lift, stall, move done, command received),
+  faults, and scan requests.
+* **Message buffers** carry data: decoded barcodes, obstacle profiles, PC
   commands, motion commands, telemetry events and outgoing MQTT frames.
 * **A mutex** with priority inheritance protects the shared encoder state.
 * **Packed 32-bit status words** (`sys_status`), each with exactly one writer,
-  let Telemetry and Vehicle Control read every subsystem's latest state
-  without locking.
+  let Telemetry, Vehicle Control and other subsystems read each subsystem's
+  latest state without locking.
+
+A few counters with several writers (dropped messages, missed periods,
+kernel errors) are updated with interrupts disabled, and the buzzer's
+request flags are single-byte stores.
 
 The RP2040 has one interrupt for all GPIO pins. `platform/gpio_irq.c` owns it,
-timestamps each edge and calls the handler for that pin (encoders, barcode
-edges, ultrasonic echo). Handlers only record data and wake a task.
+timestamps each interrupt once and calls the handler for each pin with a
+pending edge (encoders, barcode edges, ultrasonic echo). Handlers only record data and wake a task.
 
 ### 4.3 Vehicle states
 
@@ -166,12 +175,12 @@ Defined in `integration/vehicle.h` and run by `integration/vehicle.c`.
 | READY | Motors off. START (button or MQTT `start`) begins a run |
 | CALIBRATING | Sweeps 25° each side across the line to learn the black and white IR levels |
 | LINE_FOLLOWING | PID + steering on the line. A decoded barcode is turned into a junction action and latched |
-| JUNCTION_ACTION | Drives onto the junction, then turns left, right, U-turns or goes straight (no barcode = straight) |
+| JUNCTION_ACTION | Drives onto the junction, then turns left, right, U-turns or goes straight (an unmapped letter = straight). With no barcode latched the robot keeps following |
 | OBSTACLE_SCAN | Stops about 15 cm from the obstacle and scans it with the servo to measure its width |
 | BYPASS | Backs up, steps out to the clearer side, passes the obstacle and turns back to find the line |
 | REVERSE_RETRY | Neither side was clear: reverse and scan again (at most twice) |
 | LINE_REACQUIRE | Line lost for no known reason: left-right sweep; nothing within 5 s means SAFE_STOP |
-| SAFE_STOP | Motors off after a fault (impact, stall, sensor fault, lift, calibration failure, timeout). START or `reset` returns to READY |
+| SAFE_STOP | Motors off after a fault (stall, sensor fault, lift, calibration failure, timeout). START or `reset` returns to READY |
 | MISSION_COMPLETE | Run ended by START or `stop`. A summary (highest hump, barcodes, obstacles, distance) is published |
 
 Losing Wi-Fi or the broker never changes the robot's state: it carries on and
@@ -189,7 +198,7 @@ hardware, is in [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md).
 * Arm GNU toolchain (`arm-none-eabi-gcc`)
 * GNU make: `mingw32-make` from MSYS2 on Windows, or `make` on Linux/WSL
 * A host C++ compiler (`g++`) to build the `elf2uf2` converter once
-* Pico SDK 2.2.0 (for USB console, Wi-Fi and lwIP)
+* Pico SDK 2.2.0 (hardware drivers, USB console, Wi-Fi and lwIP)
 * Python 3 (the Barr-C check runs before every build)
 
 ### 5.2 Local settings (never commit these)
@@ -215,7 +224,8 @@ make SMP=0 CONSOLE=usb_cdc WIFI=cyw43 WIFI_JOIN=1 WIFI_NETIF=1 WIFI_DHCP=1 \
 make SMP=0 CONSOLE=usb_cdc DEBUG_MON=1 PICO_SDK_PATH=<path to pico-sdk>
 ```
 
-The output is a `.uf2` file in `build_make/`, named after the build profile.
+The output is a `.uf2` file in `build_make/`, named after the SMP, console
+and network settings (bench and debug options do not change the name).
 
 ### 5.4 Bench builds (one subsystem at a time)
 
@@ -266,7 +276,8 @@ mosquitto -c tools/mosquitto_robot.conf -v
 python3 tools/robot_dashboard.py --broker <PC IP>
 ```
 
-Dashboard keys:
+Dashboard keys (they work on Windows only; on other systems send commands
+with `tools/tlm_decode.py send ...`):
 
 | Key | Action |
 |---|---|
@@ -288,7 +299,8 @@ python3 tools/tlm_decode.py send map C right --version 3 --broker <PC IP>
 
 Topics are under `inf2004/aai03/`: `tlm` (telemetry, 5 Hz), `hb`
 (heartbeat), `evt` (events), `sum` (summary), `ack` (command
-acknowledgements) and `cmd` (commands to the robot). Frames are compact
+acknowledgements), `dbg` (line-following record, `DEBUG_MON=1` builds) and
+`cmd` (commands to the robot). Frames are compact
 binary, packed bit by bit. The full format is in
 [docs/MQTT_PROTOCOL.md](docs/MQTT_PROTOCOL.md).
 
@@ -325,12 +337,14 @@ The rules it enforces and the deliberate deviations are listed in
 
 ## 9. Tuning
 
-Every tuning value (speeds, PID gains, steering limits, thresholds, bypass
-distances) is in `app_program/platform/robot_cfg.h`, grouped by buddy.
+The main tuning values (speeds, PID gains, steering limits, thresholds,
+bypass distances) are in `app_program/platform/robot_cfg.h`, grouped by
+buddy; a few module-local constants are in their own `.c` files.
 
 Some values can be changed live over MQTT without reflashing, for example
 encoder scale, turn sizes, sonar beam correction and obstacle detection
-distance. Live changes are lost on reset; copy good values back into
+distance. Live changes are lost at power-off or reboot (the `reset` command
+keeps them); copy good values back into
 `robot_cfg.h`. The list of live settings is in
 [docs/MQTT_PROTOCOL.md](docs/MQTT_PROTOCOL.md#live-tuning).
 

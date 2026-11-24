@@ -70,7 +70,7 @@ ultrasonic_init (void)
 
 
 /*!
- * @brief Take one range measurement (blocks for up to about 50 ms).
+ * @brief Take one range measurement (blocks up to SONAR_TIMEOUT_MS, 40 ms).
  *
  * @param[out] p_distance_mm  Distance on ULTRASONIC_OK.
  *

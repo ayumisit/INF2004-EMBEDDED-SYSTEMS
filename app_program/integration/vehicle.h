@@ -4,17 +4,18 @@
  *        every subsystem (Week 6 Section 5).
  *
  * @par
- * Owner: integration (shared; named owner to be confirmed by the team).
+ * Owner: integration (shared by the team).
  * Vehicle Control never drives hardware: it commands Motion Control, asks
  * Obstacle Scanning for profiles and owns the barcode map (FR10).  It is
  * the only task waiting on flg_vehicle_evt.
  *
  * @par
- * Simultaneous events are handled in this order (Tribunal 1 decision):
- * safety (impact, stall, fatal fault) first, then obstacle, then commands,
- * then barcodes, then junction and line events.  A latched barcode command
- * survives an obstacle bypass and is used at the next junction.  Network
- * loss never causes a transition (NFR1, NFR17).
+ * Simultaneous events are handled in this order: safety (stall, echo
+ * fault, lift, fatal fault) first, then MQTT commands, then barcodes, then
+ * the current state's handler, which in LINE FOLLOWING takes an obstacle
+ * before a junction and a junction before a line loss.  A latched barcode
+ * command survives an obstacle bypass and is used at the next junction.
+ * Network loss never causes a transition (NFR1, NFR17).
  *
  * @par
  * Status word SYS_STATUS_VEHICLE (LSB first): [3:0] state, [5:4] latched

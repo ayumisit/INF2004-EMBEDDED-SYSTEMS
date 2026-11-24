@@ -4,11 +4,13 @@
  *        (GP28) and Code 39 decoding (Buddy 3, Week 6 Section 6.4).
  *
  * @par
- * The GPIO interrupt only stores each element's duration in a bounded FIFO
- * and wakes the task.  The task ends a capture after a quiet zone, decodes
- * it, and sends only the decoded letter to Vehicle Control, which owns the
- * letter-to-action map (FR10).  Any doubt is a REJECT: nothing is sent, so
- * a misread cannot turn the robot the wrong way.
+ * The sensor interrupt (GPIO, or ADC in analogue mode, which first finds
+ * the bar edges in the readings) stores each element's duration in a
+ * bounded FIFO and wakes the task, which does the decoding.  The task ends
+ * a capture after a quiet zone, or as soon as it decodes, and sends only
+ * the decoded letter to Vehicle Control, which owns the letter-to-action
+ * map (FR10).  Any doubt is a REJECT: nothing is sent, so a misread cannot
+ * turn the robot the wrong way.
  *
  * @par
  * Navigation message on mbf_nav_cmd: 1 byte, LSB first:

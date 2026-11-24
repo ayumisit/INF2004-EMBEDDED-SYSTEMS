@@ -6,11 +6,12 @@
  * @par
  * Pure module, unit-tested on the host.  Each scan point is converted to
  * robot coordinates (x lateral, positive to the left; y forward).  The
- * obstacle is every in-range point no deeper than OBSTACLE_DEPTH_MM behind
- * the closest one; its edges give the width, and the free lateral space
- * beyond each edge gives the clearance.  The plan passes on the side that
- * has room for the vehicle plus margin and deviates least from the line
- * (NFR9); with no room on either side it asks to reverse and retry.
+ * obstacle is the run of neighbouring points, in angle order, no deeper
+ * than OBSTACLE_DEPTH_MM behind the closest in-range point; its edges give
+ * the width, and the free lateral space beyond each edge gives the
+ * clearance.  The plan passes on the side that has room for the vehicle
+ * plus margin and deviates least from the line (NFR9); with no room on
+ * either side it asks to reverse and retry.
  * Following Week 6 Section 6.6, a missing echo means nothing within
  * SONAR_MAX_MM; samples where the sensor did not respond at all (FAULT) are
  * left out of the scan by the caller, so a dead sensor never looks clear.

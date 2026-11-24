@@ -20,7 +20,7 @@
 #define CHAR_STRIDE             (CODE39_ELEMENTS_PER_CHAR + 1u)
 #define TABLE_SIZE              44u
 #define RATIO_NUMERATOR         13u     // Wide must be >= 1.3 x narrow.
-#define RATIO_DENOMINATOR       10u     // (Was 1.5; blur widens narrow bars.)
+#define RATIO_DENOMINATOR       10u     // Low: blur widens bars.
 #define FRAME_SYMBOL            ((uint8_t) '*')   // ASCII 42: exact.
 #define FIRST_LETTER            ((uint8_t) 'A')   // ASCII 65: exact.
 #define LAST_LETTER             ((uint8_t) 'Z')   // ASCII 90: exact.
@@ -96,8 +96,8 @@ static code39_result_t classify(uint32_t const * p_elements,
 /*!
  * @brief Find and decode a 29-element frame in a capture.
  *
- * @param[in]  p_widths      Element widths in capture order, starting with
- *                           the first bar (any time unit).
+ * @param[in]  p_widths      Element widths in capture order (any time
+ *                           unit); stray elements may precede the frame.
  * @param[in]  count         Number of elements.
  * @param[out] p_symbol      ASCII data letter 'A'..'Z' on success.
  * @param[out] p_b_reversed  true if the barcode was read backwards.
@@ -253,7 +253,7 @@ decode_reversed (uint32_t const * p_widths, uint8_t * p_symbol)
  * @param[out] p_min_wide  Width of the narrowest wide element.
  *
  * @return CODE39_OK, or CODE39_BAD_RATIO if the three widest elements are
- *         not clearly (1.5 times) wider than the rest.
+ *         not at least 1.3 times as wide as the rest.
  */
 static code39_result_t
 classify (uint32_t const * p_elements, uint32_t * p_pattern,

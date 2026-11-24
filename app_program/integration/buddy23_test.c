@@ -9,8 +9,8 @@
  * task stands in for Vehicle Control with a much simpler job:
  *
  *   - calibrate the centre sensor by hand (5 s sweep across the line);
- *   - START button (GP20): start following at a slow speed, press again to
- *     stop;
+ *   - START button (GP20): start following at SPEED_SLOW_MM_S, press again
+ *     to stop;
  *   - stop by itself when the line is lost, at a junction, or if a wheel
  *     stalls (for example an encoder that does not count);
  *   - print the line state and both wheel speeds every 0.5 s, and every
@@ -42,7 +42,7 @@
 #define LOOP_STEP_MS            50u
 #define REPORT_STEPS            10u
 
-// Test speed: the mission's slow speed, so a mistake is easy to catch.
+// Test speed: the mission's straight-move speed (SPEED_SLOW_MM_S).
 #define TEST_SPEED_MM_S         SPEED_SLOW_MM_S
 
 static uint64_t g_stack[STACK_MEDIUM / sizeof(uint64_t)];
@@ -194,7 +194,8 @@ check_stop_reasons (void)
     line_follow_state_t const state  = line_follow_state(line);
     uint32_t const            motion = sys_status_read(SYS_STATUS_MOTION);
 
-    // The mode field is 3 bits wide, so the cast is exact.
+    // Motion Control writes only motion_mode_t values into this field,
+    // so the cast always gives a valid enumerator.
     motion_mode_t const       mode   = (motion_mode_t)
                                        bitpack_word_get(motion,
                                                         MOTION_MODE_SHIFT,
@@ -233,7 +234,9 @@ check_stop_reasons (void)
 static void
 stop_with_reason (char const * p_reason)
 {
-    (void) motion_stop();  // A full queue is retried on the next step.
+    // Not retried: Motion Control drains its 4-slot queue every 10 ms and
+    // this task sends at most two commands per 50 ms step.
+    (void) motion_stop();
     gb_running = false;
 
     // (UB *): string literal to the monitor API's character type.
@@ -265,7 +268,7 @@ print_status (void)
                                            MOTION_SPEED_WIDTH);
 
     // (UB *): string literal to the monitor API's character type.  The
-    // state has five values and the mode six, so indexing is safe.
+    // state is always a valid enumerator; the mode is range-checked.
     (void) tm_printf((UB *) "centre %4lu  offset %5ld  %-11s  motion %-9s"
                      "  left %4ld mm/s  right %4ld mm/s  faults 0x%02lx\n",
                      bitpack_word_get(line, LINE_CENTRE_SHIFT,

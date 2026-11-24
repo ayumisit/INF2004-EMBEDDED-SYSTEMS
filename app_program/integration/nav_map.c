@@ -3,11 +3,12 @@
  * @brief Barcode letter to navigation action map.
  *
  * @par
- * No letter is hard-coded (module requirement, 2026-10-24): the lecturer
- * gives four letters for forward, U-turn, left and right just before the
- * demo, and they arrive over MQTT (MAP_SET).  Until then, and for every
- * letter not in the current map, the action is go straight, which is also
- * what the robot does at a junction with no barcode latched.
+ * No letter is hard-coded, as the module requires: the four letters for
+ * forward, U-turn, left and right are given just before the demo and
+ * arrive over MQTT (MAP_SET).  Until then, and for every letter not in the
+ * current map, the action is go straight.  (A junction reached with no
+ * barcode latched is not acted on: Vehicle Control keeps following.)
+ *
  * @par
  * A MAP_SET with a new version starts a new map: every letter goes back to
  * straight before the new one is applied, so letters from an earlier map

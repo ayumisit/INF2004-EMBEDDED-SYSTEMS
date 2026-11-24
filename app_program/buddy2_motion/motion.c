@@ -77,13 +77,16 @@ typedef struct
     int32_t         output[WHEEL_COUNT];
     int32_t         prev_offset;
     int32_t         steer_percent;  // Steering limit, % of the speed.
-    uint32_t        straight_ms;    // Steering held for a barcode, ms.
+    uint32_t        straight_ms;    // Time spent capturing a barcode, ms.
     pid_ctrl_t      pid[WHEEL_COUNT];
 } motion_ctx_t;
 
 static motion_ctx_t g_ctx;
 
-// DIAGNOSTIC BUILD ONLY: ring of line-following samples.
+// Line-following record: a ring of samples, one per period while
+// FOLLOWING.  NOTE: it is compiled into every build and filled on every
+// line-following period.  In a DEBUG_MON=1 build, debug_mon reads it once
+// the robot stops following.
 #define REC_SLOTS               800u
 static motion_rec_t g_rec[REC_SLOTS];
 static uint32_t     g_rec_next  = 0u;
@@ -264,7 +267,7 @@ motion_follow_line (uint32_t speed_mm_s)
  *
  * @par
  * Used for the slow start after rejoining the line, so a heading error is
- * pulled out gradually instead of swinging the wheels (2026-11-24).
+ * pulled out gradually instead of swinging the wheels.
  */
 bool
 motion_follow_line_gently (uint32_t speed_mm_s, uint32_t steer_percent)
@@ -290,7 +293,7 @@ motion_stop (void)
 
 
 /*!
- * @brief DIAGNOSTIC BUILD ONLY: number of recorded samples.
+ * @brief Line-following record: number of samples held.
  *
  * @return Count, at most REC_SLOTS.
  */
@@ -302,7 +305,7 @@ motion_rec_count (void)
 
 
 /*!
- * @brief DIAGNOSTIC BUILD ONLY: samples recorded since start-up.
+ * @brief Line-following record: samples recorded since start-up.
  *
  * @return Total, which changes whenever the record has changed.
  */
@@ -314,7 +317,7 @@ motion_rec_serial (void)
 
 
 /*!
- * @brief DIAGNOSTIC BUILD ONLY: whether the record is not being written.
+ * @brief Line-following record: whether it is not being written.
  *
  * @return true when the robot is not line following.
  */
@@ -326,7 +329,7 @@ motion_rec_is_idle (void)
 
 
 /*!
- * @brief DIAGNOSTIC BUILD ONLY: one recorded sample, oldest first.
+ * @brief Line-following record: one sample, oldest first.
  *
  * @param[in]  index  0 for the oldest sample.
  * @param[out] p_rec  The sample.
@@ -345,7 +348,8 @@ motion_rec_get (uint32_t index, motion_rec_t * p_rec)
  *
  * @param[in] type        Command type.
  * @param[in] speed_mm_s  Speed, saturated to 10 bits.
- * @param[in] argument    Signed distance (mm) or angle (degrees).
+ * @param[in] argument    Signed distance (mm), angle (degrees) or FOLLOW
+ *                        steering limit (percent, 0 for the default).
  *
  * @return The command word.
  */
@@ -504,7 +508,8 @@ begin_command (uint32_t word, encoder_state_t const * p_enc)
  * @brief Enter the mode that executes a command.
  *
  * @param[in] type  Command type field.
- * @param[in] arg   Signed argument (distance in mm or angle in degrees).
+ * @param[in] arg   Signed argument (distance in mm, angle in degrees, or
+ *                  FOLLOW steering limit in percent).
  */
 static void
 start_mode (uint32_t type, int32_t arg)
@@ -563,7 +568,8 @@ set_targets (encoder_state_t const * p_enc)
                                      0u;
             uint32_t const ramp    = DECEL_FLOOR_MM_S + (left_mm * DECEL_GAIN);
 
-            // ramp and speed are below 2^16: the conversion is exact.
+            // ramp is converted only when below the speed (at most 1023),
+            // so the conversion is exact.
             int32_t const  cruise  = (ramp < g_ctx.speed_mm_s) ?
                                      (int32_t) ramp : speed;
 
@@ -611,9 +617,10 @@ follow_targets (void)
                                     BARCODE_STATE_WIDTH));
     int32_t        goal[WHEEL_COUNT];
 
-    // While the barcode sensor is crossing bars, hold the steering so it
-    // crosses them square and at a steady speed (the line is straight at
-    // the barcodes), for at most BARCODE_STRAIGHT_MS in case it misfires.
+    // While the barcode sensor is crossing bars, the steering can be held
+    // straight for at most BARCODE_STRAIGHT_MS, so the sensor crosses them
+    // square.  NOTE: it is 0 in robot_cfg.h, and straight_ms is already
+    // one period when first tested, so the hold never engages.
     g_ctx.straight_ms = b_reading ? (g_ctx.straight_ms + MS_PER_PERIOD) : 0u;
 
     if (b_reading && (g_ctx.straight_ms <= BARCODE_STRAIGHT_MS))
@@ -625,8 +632,9 @@ follow_targets (void)
     }
     else if (line_follow_age_ms(word) > LINE_STALE_MS)
     {
-        // Stale steering data: go straight and slowly (Week 6 negotiation
-        // point with Buddy 3 on steering-data age).
+        // Steering data older than LINE_STALE_MS is not trusted, so drive
+        // straight at TUNE_SPEED_SLOW, the straight-move speed, until
+        // fresh data arrives.
         goal[WHEEL_LEFT]  = tune_get(TUNE_SPEED_SLOW);
         goal[WHEEL_RIGHT] = tune_get(TUNE_SPEED_SLOW);
     }
@@ -712,7 +720,8 @@ static uint32_t
 turn_goal_um (int32_t angle_deg)
 {
     // The tuned percentages are 50..150 and |angle| is below 2^15, so both
-    // casts are exact and the product stays far below 2^32.
+    // casts are exact.  Vehicle Control turns at most 180 degrees, so the
+    // product stays below 180 x 2618 x 150, far below 2^32.
     uint32_t const percent = (uint32_t) tune_get((angle_deg >= 0) ?
                                                  TUNE_TURN_LEFT_PERCENT :
                                                  TUNE_TURN_RIGHT_PERCENT);
@@ -738,7 +747,7 @@ travelled_um (encoder_state_t const * p_enc)
                                        g_ctx.start_count[WHEEL_RIGHT]);
 
     // Both counts are non-negative, so the conversion is exact.
-    // The tuned edge length is 500..30000, so its cast is exact too.
+    // The tuned edge length is 50..30000, so its cast is exact too.
     return (((uint32_t) (left + right) *
              (uint32_t) tune_get(TUNE_ENC_UM_PER_EDGE)) / 2u);
 }
@@ -810,8 +819,9 @@ drive_wheels (encoder_state_t const * p_enc)
  * @param[in] p_enc  Current encoder state.
  *
  * @par
- * Week 6: if PWM is above its minimum but no encoder pulse arrives for
- * STALL_TIMEOUT_MS, stop the motors and raise STALL.
+ * Week 6: a wheel driven at or above MOTOR_MIN_PERMILLE whose edges are
+ * overdue (see is_wheel_stalled) once the mode is STALL_TIMEOUT_MS old
+ * stops the motors and raises STALL.
  */
 static void
 check_stall (encoder_state_t const * p_enc)

@@ -76,16 +76,16 @@
                                  ROBOT_FAULT_ENCODER |                     \
                                  ROBOT_FAULT_NO_ECHO |                     \
                                  ROBOT_FAULT_IR_CALIB)
-// Collision detection was descoped (2026-11-16): an impact is still counted
-// and reported by the IMU task, but it no longer stops the run.
+// NOTE: Collision detection is out of scope.  An impact is counted and
+// reported by the IMU task but does not stop the run.
 #define SAFETY_EVENTS           (ROBOT_EVT_STALL | ROBOT_EVT_ECHO_FAULT | \
                                  ROBOT_EVT_LIFTED)
 
 // Bench build only (make ... BENCH_NO_IMU=1): start without a working IMU so
 // the other subsystems can be tested.  The IMU fault stays raised and is
 // still reported over USB and MQTT; only the start-up check ignores it.
-// Hump height and impact detection do not work in this build.  Never use it
-// for the mission.
+// Hump height, lift and impact detection do not work in this build.  Never
+// use it for the mission.
 #ifndef BENCH_NO_IMU
 #define BENCH_NO_IMU            0
 #endif
@@ -279,7 +279,7 @@ enter (vehicle_state_t state)
 
     if ((VEHICLE_SAFE_STOP == state) || (VEHICLE_MISSION_COMPLETE == state))
     {
-        (void) motion_stop();  // A full queue still holds an earlier STOP.
+        (void) motion_stop();  // Queue drained every 10 ms: not full.
     }
 
     if (VEHICLE_SAFE_STOP == state)
@@ -340,6 +340,8 @@ take_commands (void)
     {
         uint32_t word = 0u;
 
+        // Least significant byte first; each byte is widened before the
+        // shift.
         for (uint32_t idx = 0u; idx < ROBOT_IPC_CTRL_MSG_BYTES; idx++)
         {
             word |= ((uint32_t) msg[idx]) << (idx * BITS_PER_BYTE);  // Wide.
@@ -412,8 +414,9 @@ apply_command (uint32_t word)
             // Profile the obstacle in front on request, for checking the
             // width on the bench.  Only while stopped: during a run the
             // scans belong to OBSTACLE SCAN.  The PROFILE event reports the
-            // result; the profile left in mbf_obs_profile is replaced by
-            // the next scan before OBSTACLE SCAN reads it.
+            // result.  The buffer holds two profiles and OBSTACLE SCAN takes
+            // the newest, so after one bench scan the run's own profile is
+            // used; after two, the run's profile is dropped.
             if (!is_running())
             {
                 obstacle_request_scan();
@@ -639,7 +642,7 @@ on_obstacle_scan (uint32_t events)
  * @par
  * DETOUR ends on the approach leg, which drives towards the line until the
  * centre sensor finds it.  CENTRING then drives on until the axle is over
- * the line, and REALIGN turns back towards the old heading until the
+ * the line, and REALIGN turns back towards the original heading until the
  * sensor meets the line again, so the robot ends up on the line and
  * pointing along it whatever angle it arrived at.
  *
@@ -854,7 +857,7 @@ poll_button (void)
         }
         else if (is_running())
         {
-            // Manual end of course (the brief leaves the end trigger TBC).
+            // START during a run ends the course manually.
             enter(VEHICLE_MISSION_COMPLETE);
         }
         else if (VEHICLE_INITIALISING != g_ctx.state)
@@ -893,7 +896,7 @@ check_timeouts (void)
             b_late = (age_ms > PROFILE_TIMEOUT_MS);
         break;
 
-        // The four step-list states share one limit (labels fall through).
+        // These four step-list states share one limit (labels fall through).
         case VEHICLE_CALIBRATING:
         case VEHICLE_JUNCTION_ACTION:
         case VEHICLE_BYPASS:
@@ -937,9 +940,9 @@ start_run (void)
  * @brief Return to LINE FOLLOWING.
  *
  * @param[in] slow_ms  How long to follow slowly and gently first:
- *                     FOLLOW_SLOW_LONG_MS after a bypass or line search,
- *                     FOLLOW_SLOW_SHORT_MS otherwise, 0 for none (back
- *                     on the line after a short loss).
+ *                     FOLLOW_SLOW_LONG_MS after a bypass (or the search
+ *                     that ends one), FOLLOW_SLOW_SHORT_MS otherwise, 0
+ *                     for none (back on the line after a line loss).
  *
  * @par
  * The junction hold is released here as well, because rejoining the line
@@ -951,11 +954,10 @@ follow (uint32_t slow_ms)
     line_follow_clear_junction();
     enter(VEHICLE_LINE_FOLLOWING);
     // Following begins slowly and with gentle steering, because the robot
-    // has just come out of a turn and may still be carrying rotation and a
-    // heading error; dispatch() raises it to the full speed and steering
-    // after slow_ms (2026-11-24: was SPEED_SLOW_MM_S, faster than following
-    // itself, with full steering, for 600 ms after everything).
-    // The 4-slot command queue cannot be full: this task issues at most two
+    // may still be carrying rotation and a heading error from a turn, or be
+    // off the line edge after a stop.  dispatch() raises it to the full
+    // speed and steering after slow_ms.
+    // The 4-slot command queue cannot fill: this task issues only a few
     // commands per cycle and Motion Control drains the queue every 10 ms.
     g_ctx.b_lost_pending = false;
     g_ctx.b_follow_slow  = (slow_ms > 0u);

@@ -4,8 +4,9 @@
  *        and impact detection (Buddy 4, Week 6 Section 6.5).
  *
  * @par
- * Status word SYS_STATUS_IMU (LSB first): [7:0] pitch in 0.5 degree units
- * (excess-128), [16:8] heading 0..359 degrees, [19:17] motion class,
+ * Status word SYS_STATUS_IMU (LSB first): [7:0] tilt (pitch and roll
+ * combined, never negative) in 0.5 degree units (excess-128), the field
+ * named IMU_PITCH; [16:8] heading 0..359 degrees, [19:17] motion class,
  * [21:20] hump state, [22] data valid, [26:23] impact count (saturating).
  *
  * @par
@@ -14,8 +15,9 @@
  *
  * @par
  * Lift detection: ROBOT_EVT_LIFTED is raised on flg_vehicle_evt when the
- * robot is picked up (lift.h).  The lift count is read through a function
- * because the telemetry status word is full.
+ * robot is picked up (lift.h).  The lift count is in no status word:
+ * the USB monitor reads imu_lift_count(), and telemetry reports each
+ * lift as an event.
  *
  * @par
  * COPYRIGHT NOTICE: (c) 2026 AAI03 team, INF2004.  All rights reserved.

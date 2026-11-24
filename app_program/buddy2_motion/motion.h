@@ -5,14 +5,16 @@
  * @par
  * Other subsystems never drive the motors.  They call the functions below,
  * which pack a command (Change Requirement 1: 29 bits in one 32-bit word)
- * and queue it on mbf_motion_cmd.  A new command pre-empts the current one.
+ * and queue it on mbf_motion_cmd.  A new command pre-empts the current one,
+ * except that only STOP is accepted while STALLED.
  * When a MOVE, TURN or STOP finishes, the task sets ROBOT_EVT_MOVE_DONE; on
  * a stall it stops the motors and sets ROBOT_EVT_STALL.
  *
  * @par
  * Command word (LSB first): [2:0] type, [12:3] speed mm/s,
  * [28:13] signed argument (excess-32768): distance in mm for MOVE, angle in
- * degrees for TURN (positive = left / anticlockwise).
+ * degrees for TURN (positive = left / anticlockwise), steering limit in
+ * percent for FOLLOW (0 = STEER_LIMIT_PERCENT).
  *
  * @par
  * Status word SYS_STATUS_MOTION (LSB first): [2:0] mode, [13:3] left speed
@@ -82,8 +84,10 @@ bool     motion_stop(void);
 uint32_t motion_pack_command(motion_cmd_type_t type, uint32_t speed_mm_s,
                              int32_t argument);
 
-// DIAGNOSTIC BUILD ONLY: the last seconds of line following, one entry
-// per 10 ms period, for the USB monitor to print after a run.
+// Line-following record: the last 8 s of line following, one entry per
+// 10 ms period, compiled into every build.  In a DEBUG_MON=1 build,
+// debug_mon prints it on the USB monitor and sends it over MQTT once the
+// robot stops following.
 typedef struct
 {
     uint32_t    line_word;      // SYS_STATUS_LINE word used for steering.

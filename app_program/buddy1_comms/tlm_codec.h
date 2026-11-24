@@ -23,7 +23,7 @@
  *   byte 2 (MAP_SET only): [4:0] letter 0..25, [6:5] action.
  *   TUNE: byte 1 [7:4] is the setting id (tune.h) instead of the map
  *   version; bytes 2-3 are the new value, signed 16-bit little-endian.
- * START, STOP, RESET and SUMMARY are 2 bytes; MAP_SET is 3; TUNE is 4.
+ * START, STOP, RESET, SUMMARY and SCAN are 2 bytes; MAP_SET is 3; TUNE is 4.
  *
  * @par
  * Command word on mbf_ctrl_cmd (LSB first): [3:0] command, [8:4] letter,
@@ -66,7 +66,7 @@ typedef enum
     TLM_TOPIC_EVENT,
     TLM_TOPIC_SUMMARY,
     TLM_TOPIC_ACK,
-    TLM_TOPIC_DEBUG,            // DIAGNOSTIC BUILD ONLY: raw record chunks.
+    TLM_TOPIC_DEBUG,            // DEBUG_MON builds only: motion records.
     TLM_TOPIC_COUNT
 } tlm_codec_topic_t;
 

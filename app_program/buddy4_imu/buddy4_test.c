@@ -3,10 +3,13 @@
  * @brief Buddy 4 stand-alone bench test: IMU (GY-511 / LSM303) diagnostic.
  *
  * @par
- * Built only with BUDDY_TEST=4 (see app_main.c).  Each round, at 100 kHz
- * and then 400 kHz: print the idle SDA/SCL levels, scan the bus, read the
- * identity registers that tell the LSM303 variants apart, then run the
- * real driver's lsm303_hw_init() and READ_COUNT accelerometer reads.
+ * Started only with BUDDY_TEST=4 (see app_main.c).  One round runs at
+ * 100 kHz, then one at 400 kHz.  Each round prints the idle SDA/SCL
+ * levels, scans the bus and reads the identity registers at 0x19 and
+ * 0x1E (DLHC, AGR, or an LSM303D with SA0 high; this robot's LSM303D at
+ * 0x1D shows only in the scan and the driver test), then runs the real
+ * driver's lsm303_hw_init(), which switches the bus to IMU_I2C_HZ, and
+ * READ_COUNT accelerometer reads.
  *
  * @par
  * Expected for a working LSM303DLHC: lines high, devices at 0x19 and 0x1E,
@@ -160,7 +163,7 @@ print_scan (void)
 
 
 /*!
- * @brief Print the identity registers that tell the LSM303 variants apart.
+ * @brief Print the identity registers at 0x19 and 0x1E (not 0x1D).
  */
 static void
 print_identity (void)
