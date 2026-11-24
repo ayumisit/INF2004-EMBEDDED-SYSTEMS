@@ -24,6 +24,7 @@
 #include "servo_hw.h"
 #include "ultrasonic.h"
 #include "obs_profile.h"
+#include "tune.h"
 #include "obstacle.h"
 
 #define COARSE_ANGLES           5u
@@ -192,6 +193,9 @@ monitor_once (void)
 {
     uint32_t                  distance_mm = 0u;
     ultrasonic_result_t const result      = ultrasonic_measure(&distance_mm);
+    // Live setting (2026-11-24), 100..300 mm, so the cast is exact.
+    uint32_t const            detect_mm   =
+        (uint32_t) tune_get(TUNE_OBS_DETECT_MM);
 
     note_result(result);
 
@@ -203,7 +207,8 @@ monitor_once (void)
         // would make the same obstacle raise a second event after the stop.
         g_ctx.near_count = 0u;
     }
-    else if ((ULTRASONIC_OK == result) && (distance_mm < OBSTACLE_DETECT_MM))
+    else if ((ULTRASONIC_OK == result) &&
+             (distance_mm < detect_mm))
     {
         g_ctx.front_cm = distance_mm / MM_PER_CM;
         g_ctx.near_count++;

@@ -42,6 +42,7 @@
 #include "buzzer.h"
 #include "encoder.h"
 #include "motion.h"
+#include "vehicle.h"
 #include "lsm303_hw.h"
 #include "hump.h"
 #include "lift.h"
@@ -77,6 +78,12 @@ typedef struct
     int32_t     calib_pitch_sum;
     int32_t     calib_roll_sum;
     int32_t     calib_mag_sum;
+    uint32_t    relevel_count;      // Samples in this READY block.
+    int32_t     relevel_pitch_sum;
+    int32_t     relevel_roll_sum;
+    int32_t     relevel_mag_sum;
+    int32_t     relevel_low_mdeg;   // Lowest raw pitch in the block.
+    int32_t     relevel_high_mdeg;  // Highest raw pitch in the block.
     int32_t     pitch_bias_mdeg;
     int32_t     roll_bias_mdeg;
     int32_t     one_g_mg;
@@ -113,6 +120,7 @@ static void    classify(encoder_state_t const * p_enc);
 static void    track_hump(bool b_valid);
 static void    track_lift(bool b_valid);
 static bool    is_frozen(int32_t const * p_accel);
+static void    relevel(int32_t pitch, int32_t roll, int32_t magnitude);
 static bool    is_following_steadily(encoder_state_t const * p_enc);
 static void    publish(bool b_valid);
 
@@ -305,6 +313,7 @@ sample (int32_t * p_accel)
             g_ctx.tilt_mdeg   = combine_tilt(g_ctx.pitch_mdeg,
                                              g_ctx.roll_mdeg);
             check_impact(magnitude);
+            relevel(pitch, roll, magnitude);
             b_valid = true;
         }
 
@@ -312,6 +321,68 @@ sample (int32_t * p_accel)
     }
 
     return (b_valid);
+}
+
+
+/*!
+ * @brief Re-learn level while the robot waits in READY.
+ *
+ * @param[in] pitch      Raw pitch of this sample, millidegrees.
+ * @param[in] roll       Raw roll of this sample, millidegrees.
+ * @param[in] magnitude  Acceleration magnitude of this sample, mg.
+ *
+ * @par
+ * 2026-11-24: level was only learnt at power-on.  Powered on in a hand,
+ * the robot later read 16.5 degrees sitting flat on the track, which is
+ * over LIFT_TILT_STEADY_MDEG, so every run stopped as "picked up".  Now
+ * every block of IMU_CALIB_SAMPLES samples taken in READY whose raw pitch
+ * stays within IMU_RELEVEL_SPAN_MDEG (held still, not in a hand) replaces
+ * the level, so the robot is level wherever it sat still before Start.
+ */
+static void
+relevel (int32_t pitch, int32_t roll, int32_t magnitude)
+{
+    uint32_t const state = bitpack_word_get(sys_status_read(
+                                                SYS_STATUS_VEHICLE),
+                                            VEHICLE_STATE_SHIFT,
+                                            VEHICLE_STATE_WIDTH);
+    // Cast: enumeration value, exact.
+    bool const     b_ready = ((uint32_t) VEHICLE_READY == state);
+    bool const     b_first = (0u == g_ctx.relevel_count);
+
+    g_ctx.relevel_pitch_sum = b_first ? pitch :
+                              (g_ctx.relevel_pitch_sum + pitch);
+    g_ctx.relevel_roll_sum  = b_first ? roll :
+                              (g_ctx.relevel_roll_sum + roll);
+    g_ctx.relevel_mag_sum   = b_first ? magnitude :
+                              (g_ctx.relevel_mag_sum + magnitude);
+    g_ctx.relevel_low_mdeg  = (b_first || (pitch < g_ctx.relevel_low_mdeg)) ?
+                              pitch : g_ctx.relevel_low_mdeg;
+    g_ctx.relevel_high_mdeg = (b_first ||
+                               (pitch > g_ctx.relevel_high_mdeg)) ?
+                              pitch : g_ctx.relevel_high_mdeg;
+    g_ctx.relevel_count     = b_ready ? (g_ctx.relevel_count + 1u) : 0u;
+
+    if ((g_ctx.relevel_count >= IMU_CALIB_SAMPLES) &&
+        ((g_ctx.relevel_high_mdeg - g_ctx.relevel_low_mdeg) <=
+         IMU_RELEVEL_SPAN_MDEG))
+    {
+        // Casts: the count is IMU_CALIB_SAMPLES (50), exact.
+        g_ctx.pitch_bias_mdeg = g_ctx.relevel_pitch_sum /
+                                (int32_t) g_ctx.relevel_count;  // 50.
+        g_ctx.roll_bias_mdeg  = g_ctx.relevel_roll_sum /
+                                (int32_t) g_ctx.relevel_count;  // 50.
+        g_ctx.one_g_mg        = g_ctx.relevel_mag_sum /
+                                (int32_t) g_ctx.relevel_count;  // 50.
+        g_ctx.pitch_mdeg      = 0;
+        g_ctx.roll_mdeg       = 0;
+        g_ctx.tilt_mdeg       = 0;
+    }
+
+    if (g_ctx.relevel_count >= IMU_CALIB_SAMPLES)
+    {
+        g_ctx.relevel_count = 0u;  // Start the next block.
+    }
 }
 
 

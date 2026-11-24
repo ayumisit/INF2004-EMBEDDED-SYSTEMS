@@ -409,8 +409,8 @@ test_hump (void)
     CHECK(1u == run_hump(&hump, -12000, 20u, 0u, 0u, &height));
     CHECK(near((int32_t) height, 20, 1));
 
-    // Below the 5-degree threshold, or too brief: not a hump.
-    CHECK(0u == run_hump(&hump, 4000, 20u, 0u, 0u, &height));
+    // Below the 3-degree threshold, or too brief: not a hump.
+    CHECK(0u == run_hump(&hump, 2500, 20u, 0u, 0u, &height));
     CHECK(0u == run_hump(&hump, 8000, 1u, 2u, 0u, &height));
     CHECK(0u == hump_max_mm(&hump));
 
@@ -633,18 +633,27 @@ test_obs_beam (void)
     {
         bool const b_hit  = (angle >= 65u) && (angle <= 115u);
         bool const b_face = (angle >= 80u) && (angle <= 100u);
+        // Cast: angle is at most 150, so the conversion is exact.
+        int32_t const sine = fix_math_sin_q15((int32_t) angle * 1000);
 
+        // A flat face 250 mm ahead reads 250 / sin(angle); the cone hears
+        // the corners (255 mm) out to 65 and 115 degrees.  Cast: 250..254.
         spread[used].angle_deg   = angle;
-        spread[used].distance_mm = b_face ? 250u : (b_hit ? 255u : 1500u);
+        spread[used].distance_mm = b_face ?
+                                   (uint32_t) ((250 * FIX_MATH_Q15_ONE) /
+                                               sine) :
+                                   (b_hit ? 255u : 1500u);
         spread[used].b_echo      = b_hit;
         used++;
     }
 
     // Casts: enumeration value and small constants, all exact.
     CHECK(tune_set((uint32_t) TUNE_OBS_BEAM_DEG, 0));
-    // Uncorrected it reads about 215 mm, capped at OBSTACLE_MAX_WIDTH_MM.
+    // From the angle alone it read about 215 mm (capped at
+    // OBSTACLE_MAX_WIDTH_MM).  The range limit (2026-11-24) puts each edge
+    // at the corner's range, so it is near the true 100 mm even uncorrected.
     obs_profile_compute(spread, used, &profile);
-    CHECK(OBSTACLE_MAX_WIDTH_MM == profile.width_mm);
+    CHECK(near((int32_t) profile.width_mm, 100, 15));  // Cast: < 2^16.
 
     // Casts: enumeration value and small constants, all exact.
     CHECK(tune_set((uint32_t) TUNE_OBS_BEAM_DEG,
@@ -666,6 +675,33 @@ test_obs_beam (void)
 
     obs_profile_compute(spread, used, &profile);
     CHECK(near((int32_t) profile.width_mm, 100, 40));  // Cast: < 2^16.
+
+    // A 150 mm box only 100 mm ahead (the closer stop, 2026-11-24): its
+    // corners are 125 mm away at 53 and 127 degrees, and the 15-degree cone
+    // still hears them out to 40 and 140 degrees.  The face in between
+    // reads 100 / sin(angle).
+    used = 0u;
+
+    for (uint32_t angle = 20u; angle <= 160u; angle += 5u)
+    {
+        bool const b_hit  = (angle >= 40u) && (angle <= 140u);
+        bool const b_face = (angle >= 55u) && (angle <= 125u);
+        // Cast: angle is at most 160, so the conversion is exact.
+        int32_t const sine = fix_math_sin_q15((int32_t) angle * 1000);
+
+        spread[used].angle_deg   = angle;
+        // Cast: 100 / sin is 100..122 on the face, so it is exact.
+        spread[used].distance_mm = b_face ?
+                                   (uint32_t) ((100 * FIX_MATH_Q15_ONE) /
+                                               sine) :
+                                   (b_hit ? 125u : 1500u);
+        spread[used].b_echo      = b_hit;
+        used++;
+    }
+
+    obs_profile_compute(spread, used, &profile);
+    CHECK(near((int32_t) profile.width_mm, 150, 20));  // Cast: < 2^16.
+    CHECK(near((int32_t) profile.distance_mm, 100, 5));  // Cast: < 2^16.
 }
 
 

@@ -76,6 +76,7 @@ typedef struct
     int32_t         target[WHEEL_COUNT];
     int32_t         output[WHEEL_COUNT];
     int32_t         prev_offset;
+    int32_t         steer_percent;  // Steering limit, % of the speed.
     uint32_t        straight_ms;    // Steering held for a barcode, ms.
     pid_ctrl_t      pid[WHEEL_COUNT];
 } motion_ctx_t;
@@ -139,6 +140,7 @@ motion_start (void)
 
     g_ctx.mode        = MOTION_MODE_IDLE;
     g_ctx.prev_offset = 0;
+    g_ctx.steer_percent = (int32_t) STEER_LIMIT_PERCENT;  // < 100: exact.
 
     result = encoder_start();
 
@@ -247,6 +249,31 @@ bool
 motion_follow_line (uint32_t speed_mm_s)
 {
     return (send_command(MOTION_CMD_FOLLOW, speed_mm_s, 0));
+}
+
+
+/*!
+ * @brief Follow the line with the steering limited to a smaller share of
+ *        the speed than STEER_LIMIT_PERCENT.
+ *
+ * @param[in] speed_mm_s     Base speed.
+ * @param[in] steer_percent  Steering limit, % of the speed (1 to
+ *                           STEER_LIMIT_PERCENT).
+ *
+ * @return true if the command was queued.
+ *
+ * @par
+ * Used for the slow start after rejoining the line, so a heading error is
+ * pulled out gradually instead of swinging the wheels (2026-11-24).
+ */
+bool
+motion_follow_line_gently (uint32_t speed_mm_s, uint32_t steer_percent)
+{
+    // steer_percent is a small setting below 2^31, so the cast is exact.
+    int32_t const percent = fix_math_clamp((int32_t) steer_percent, 1,
+                                           (int32_t) STEER_LIMIT_PERCENT);
+
+    return (send_command(MOTION_CMD_FOLLOW, speed_mm_s, percent));
 }
 
 
@@ -486,6 +513,10 @@ start_mode (uint32_t type, int32_t arg)
     switch (type)
     {
         case MOTION_CMD_FOLLOW:
+            // A positive argument is a lower steering limit (percent).
+            // STEER_LIMIT_PERCENT is below 100, so the cast is exact.
+            g_ctx.steer_percent = (arg > 0) ? arg :
+                                  (int32_t) STEER_LIMIT_PERCENT;
             g_ctx.prev_offset = 0;
             enter_mode(MOTION_MODE_FOLLOWING);
         break;
@@ -607,9 +638,16 @@ follow_targets (void)
                                 (tune_get(TUNE_STEER_KD) *
                                  (offset - g_ctx.prev_offset))) /
                                GAIN_SCALE;
-        // Cast: the percentage is below 100, so the conversion is exact.
-        int32_t const limit  = (base * (int32_t) STEER_LIMIT_PERCENT) / 100;
-        int32_t const steer  = fix_math_clamp(raw, -limit, limit);
+        // A negative steer slows the left wheel (a left curve); it may go
+        // further (STEER_LEFT_LIMIT_PERCENT) unless following gently.
+        // Cast: the percentage is at most 100, so the conversion is exact.
+        int32_t const left   = (g_ctx.steer_percent <
+                                (int32_t) STEER_LIMIT_PERCENT) ?
+                               g_ctx.steer_percent :
+                               (int32_t) STEER_LEFT_LIMIT_PERCENT;
+        int32_t const limit  = (base * g_ctx.steer_percent) / 100;
+        int32_t const steer  = fix_math_clamp(raw, -((base * left) / 100),
+                                              limit);
 
         goal[WHEEL_LEFT]  = base + steer;
         goal[WHEEL_RIGHT] = base - steer;
@@ -906,5 +944,5 @@ sign_of (int32_t value)
     return (sign);
 }
 
-/*** end of file ***/
 
+/*** end of file ***/

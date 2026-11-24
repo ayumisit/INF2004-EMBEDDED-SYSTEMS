@@ -37,7 +37,6 @@
 
 #define WAIT_MS                 50
 #define US_PER_MS               1000u
-#define FOLLOW_SLOW_MS          600u    // Slow start after every turn.
 #define MAX_STEPS               8u
 #define CALIB_SWEEP_DEG         25
 #define SWEEP_UNIT_DEG          30
@@ -68,6 +67,7 @@
 #define BACKUP_MM               ((int32_t) BYPASS_BACKUP_MM)
 #define MIN_LATERAL_MM          ((int32_t) BYPASS_LATERAL_MM)
 #define LATERAL_PERCENT         ((int32_t) BYPASS_LATERAL_PERCENT)
+#define LATERAL_EXTRA_MM        ((int32_t) BYPASS_LATERAL_EXTRA_MM)
 #define REJOIN_GUARD_PERCENT    ((int32_t) BYPASS_REJOIN_GUARD_PERCENT)
 #define PERCENT                 100
 #define APPROACH_MAX_MM         ((int32_t) BYPASS_APPROACH_MAX_MM)
@@ -139,6 +139,10 @@ typedef struct
     bool             b_steps_running;
     bool             b_scan_requested;
     bool             b_follow_slow;     // Still in the slow start of following.
+    uint32_t         follow_slow_ms;    // Length of this slow start.
+    bool             b_lost_pending;    // Line lost soon after resuming.
+    uint32_t         lost_us;           // When that loss was reported.
+    uint32_t         reacquire_slow_ms; // Slow start once the search ends.
     bypass_phase_t   phase;
     bool             b_searching;       // LINE_FOUND has been asked for.
     bool             b_approaching;     // The approach leg has started.
@@ -176,9 +180,10 @@ static void on_reacquire(uint32_t events, bool b_finished);
 static void poll_button(void);
 static void check_timeouts(void);
 static void start_run(void);
-static void follow(void);
+static void follow(uint32_t slow_ms);
+static bool relost_expired(void);
 static void begin_junction(bool b_at_junction);
-static void begin_reacquire(void);
+static void begin_reacquire(uint32_t then_slow_ms);
 static void begin_bypass(void);
 static void begin_plan(void);
 static void run_steps(step_t const * p_steps, uint32_t count);
@@ -474,7 +479,7 @@ dispatch (uint32_t events)
             {
                 if (line_follow_end_calibration())
                 {
-                    follow();
+                    follow(FOLLOW_SLOW_SHORT_MS);  // After calibration.
                 }
                 else
                 {
@@ -486,7 +491,7 @@ dispatch (uint32_t events)
         case VEHICLE_LINE_FOLLOWING:
             if ((g_ctx.b_follow_slow) &&
                 ((board_hw_time_us() - g_ctx.entered_us) >=
-                 (FOLLOW_SLOW_MS * US_PER_MS)))
+                 (g_ctx.follow_slow_ms * US_PER_MS)))
             {
                 // Settled on the edge: up to the full following speed.
                 // The tuned speed is 30..600, so the cast is exact.
@@ -495,14 +500,17 @@ dispatch (uint32_t events)
                            (uint32_t) tune_get(TUNE_SPEED_FOLLOW));
             }
 
-            on_line_following(events);
+            if (!relost_expired())
+            {
+                on_line_following(events);
+            }
         break;
 
         case VEHICLE_JUNCTION_ACTION:
             if (b_finished)
             {
                 g_ctx.junctions++;
-                follow();
+                follow(FOLLOW_SLOW_SHORT_MS);  // After a junction turn.
             }
         break;
 
@@ -572,9 +580,21 @@ on_line_following (uint32_t events)
             // The line ended with a U-turn saved: run it here.
             begin_junction(false);
         }
+        else if ((!g_ctx.b_lost_pending) &&
+                 ((board_hw_time_us() - g_ctx.entered_us) <
+                  (LINE_RELOST_MS * US_PER_MS)))
+        {
+            // Lost again just after resuming (a sharp bend): keep
+            // following, steering hard to where the line went, before
+            // searching (relost_expired).
+            g_ctx.b_lost_pending = true;
+            g_ctx.lost_us        = board_hw_time_us();
+        }
         else
         {
-            begin_reacquire();
+            // Back to full following once found: a short loss needs the
+            // full steering, not the gentle slow start.
+            begin_reacquire(0u);
         }
     }
     else
@@ -662,12 +682,12 @@ on_bypass (uint32_t events, bool b_finished)
     {
         // REALIGN met the line: back on it and pointing along it.
         g_ctx.bypasses++;
-        follow();
+        follow(FOLLOW_SLOW_LONG_MS);   // After a bypass.
     }
     else if (b_finished)
     {
         // REALIGN turned its full angle without meeting the line.
-        begin_reacquire();
+        begin_reacquire(FOLLOW_SLOW_LONG_MS);
     }
     else
     {
@@ -718,7 +738,7 @@ bypass_detour (bool b_found, bool b_finished)
     else if (b_finished)
     {
         // The approach leg reached its limit without finding the line.
-        begin_reacquire();
+        begin_reacquire(FOLLOW_SLOW_LONG_MS);
     }
     else if ((!g_ctx.b_searching) &&
              (g_ctx.step_index >= APPROACH_LEG_STEP))
@@ -805,7 +825,7 @@ on_reacquire (uint32_t events, bool b_finished)
 {
     if (0u != (events & ROBOT_EVT_LINE_FOUND))
     {
-        follow();
+        follow(g_ctx.reacquire_slow_ms);  // Set by begin_reacquire().
     }
     else if (b_finished)
     {
@@ -916,23 +936,81 @@ start_run (void)
 /*!
  * @brief Return to LINE FOLLOWING.
  *
+ * @param[in] slow_ms  How long to follow slowly and gently first:
+ *                     FOLLOW_SLOW_LONG_MS after a bypass or line search,
+ *                     FOLLOW_SLOW_SHORT_MS otherwise, 0 for none (back
+ *                     on the line after a short loss).
+ *
  * @par
  * The junction hold is released here as well, because rejoining the line
  * at an angle can leave the line task holding a false junction.
  */
 static void
-follow (void)
+follow (uint32_t slow_ms)
 {
     line_follow_clear_junction();
     enter(VEHICLE_LINE_FOLLOWING);
-    // Following begins at the slow speed, because the robot has just come
-    // out of a turn and may still be carrying rotation and a heading error;
-    // dispatch() raises it to the full speed after FOLLOW_SLOW_MS.
+    // Following begins slowly and with gentle steering, because the robot
+    // has just come out of a turn and may still be carrying rotation and a
+    // heading error; dispatch() raises it to the full speed and steering
+    // after slow_ms (2026-11-24: was SPEED_SLOW_MM_S, faster than following
+    // itself, with full steering, for 600 ms after everything).
     // The 4-slot command queue cannot be full: this task issues at most two
     // commands per cycle and Motion Control drains the queue every 10 ms.
-    // The tuned speed is 30..600, so the cast is exact.
-    g_ctx.b_follow_slow = true;
-    (void) motion_follow_line((uint32_t) tune_get(TUNE_SPEED_SLOW));
+    g_ctx.b_lost_pending = false;
+    g_ctx.b_follow_slow  = (slow_ms > 0u);
+    g_ctx.follow_slow_ms = slow_ms;
+
+    if (g_ctx.b_follow_slow)
+    {
+        // Cast: the queue cannot be full (see above), so it is ignored.
+        (void) motion_follow_line_gently(FOLLOW_SLOW_SPEED_MM_S,
+                                         FOLLOW_SLOW_STEER_PERCENT);
+    }
+    else
+    {
+        // The tuned speed is 30..600, so the cast is exact.
+        (void) motion_follow_line((uint32_t) tune_get(TUNE_SPEED_FOLLOW));
+    }
+}
+
+
+/*!
+ * @brief LINE FOLLOWING: end the wait for a line lost just after resuming.
+ *
+ * @return true if the line search has started (the state has changed).
+ *
+ * @par
+ * The wait ends when the line is under the sensors again, or after
+ * LINE_RELOST_WAIT_MS without it, when the search starts as usual.
+ */
+static bool
+relost_expired (void)
+{
+    line_follow_state_t const line    = line_follow_state(line_follow_read());
+    bool                      b_start = false;
+
+    if (!g_ctx.b_lost_pending)
+    {
+        // Nothing lost.
+    }
+    else if ((LINE_STATE_TRACKING == line) || (LINE_STATE_JUNCTION == line))
+    {
+        g_ctx.b_lost_pending = false;
+    }
+    else if ((board_hw_time_us() - g_ctx.lost_us) >=
+             (LINE_RELOST_WAIT_MS * US_PER_MS))
+    {
+        g_ctx.b_lost_pending = false;
+        begin_reacquire(0u);
+        b_start = true;
+    }
+    else
+    {
+        // Still waiting for the line.
+    }
+
+    return (b_start);
 }
 
 
@@ -996,10 +1074,16 @@ begin_junction (bool b_at_junction)
 
 /*!
  * @brief LINE REACQUIRE: sweep left and right around the current heading.
+ *
+ * @param[in] then_slow_ms  Slow start once the line is found (see follow):
+ *                          FOLLOW_SLOW_LONG_MS after a bypass, 0 after a
+ *                          line lost while following.
  */
 static void
-begin_reacquire (void)
+begin_reacquire (uint32_t then_slow_ms)
 {
+    g_ctx.reacquire_slow_ms = then_slow_ms;
+
     // Start towards the side the line was last seen: the published offset
     // is positive when it went right (positive turn = left).  Then 1, 2,
     // 3, 4 and 2 sweep units alternating: the sweep ends on the heading it
@@ -1032,7 +1116,7 @@ begin_plan (void)
     switch (g_ctx.profile.plan)
     {
         case OBS_PLAN_CONTINUE:
-            follow();
+            follow(FOLLOW_SLOW_SHORT_MS);  // Nothing in the way.
         break;
 
         case OBS_PLAN_PASS_LEFT:
@@ -1081,8 +1165,9 @@ begin_bypass (void)
     int32_t const ahead   = (int32_t) g_ctx.profile.distance_mm + BACKUP_MM;
     int32_t const needed  = (((width / 2) + HALF_VEHICLE_MM + MARGIN_MM) *
                              LATERAL_PERCENT) / PERCENT;
-    int32_t const lateral = (needed > MIN_LATERAL_MM) ? needed :
-                                                        MIN_LATERAL_MM;
+    int32_t const lateral = ((needed > MIN_LATERAL_MM) ? needed :
+                                                         MIN_LATERAL_MM) +
+                            LATERAL_EXTRA_MM;
     int32_t const leg     = (lateral * SQRT2_MILLI) / MILLI;
     int32_t const pass    = fix_math_clamp(ahead + DEPTH_EST_MM +
                                            LENGTH_MM - lateral,

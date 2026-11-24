@@ -58,6 +58,7 @@ typedef struct
 } extent_t;
 
 static position_t         to_position(obs_profile_point_t const * p_point);
+static int32_t            face_reach_mm(uint32_t range_mm, int32_t face_mm);
 static obs_profile_point_t beam_corrected(obs_profile_point_t const * p_point,
                                           uint32_t centre_deg);
 static uint32_t           sort_by_angle(obs_profile_point_t const * p_points,
@@ -362,7 +363,13 @@ find_extent (obs_profile_point_t const * p_points, uint32_t count,
             obs_profile_point_t const point =
                 beam_corrected(&p_points[idx],
                                p_points[p_extent->closest].angle_deg);
-            position_t const          pos   = to_position(&point);
+            position_t                pos   = to_position(&point);
+            int32_t const             reach =
+                face_reach_mm(p_points[idx].distance_mm,
+                              p_extent->closest_y_mm);
+
+            // Never further out than the range allows (face_reach_mm).
+            pos.x_mm = fix_math_clamp(pos.x_mm, -reach, reach);
 
             p_extent->left_x_mm  = (pos.x_mm > p_extent->left_x_mm) ?
                                    pos.x_mm : p_extent->left_x_mm;
@@ -372,6 +379,43 @@ find_extent (obs_profile_point_t const * p_points, uint32_t count,
     }
 
     return (b_found);
+}
+
+
+/*!
+ * @brief Furthest sideways an echo at this range can have come from.
+ *
+ * @param[in] range_mm  Echo range.
+ * @param[in] face_mm   Forward distance of the obstacle's closest point.
+ *
+ * @return sqrt(range^2 - face^2) in mm, 0 if the range is shorter.
+ *
+ * @par
+ * 2026-11-24: the obstacle is no nearer than its closest point, so an echo
+ * at range r lies at most sqrt(r^2 - face^2) to the side.  The sonar cone
+ * keeps hearing a corner after the servo has turned past it, but always at
+ * the corner's own range, so this places each edge where the corner is
+ * whatever the beam width.  Every width was being read as 20 cm or more
+ * (the OBSTACLE_MAX_WIDTH_MM cap) from the angle alone.
+ */
+static int32_t
+face_reach_mm (uint32_t range_mm, int32_t face_mm)
+{
+    // Ranges are below OBSTACLE_PROFILE_MM + OBSTACLE_DEPTH_MM (< 2^10) and
+    // the face is no further, so the squares fit and every cast is exact.
+    int32_t const range = (int32_t) range_mm;
+    int32_t const face  = (face_mm > 0) ? face_mm : 0;
+    int32_t       reach = 0;
+
+    if (range > face)
+    {
+        // Casts: the difference is positive and below 2^20, and its root
+        // below 2^10, so both conversions are exact.
+        reach = (int32_t) fix_math_isqrt((uint32_t) ((range * range) -
+                                                     (face * face)));
+    }
+
+    return (reach);
 }
 
 

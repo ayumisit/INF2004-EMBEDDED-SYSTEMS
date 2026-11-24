@@ -187,6 +187,18 @@
 // which took 27 s at 45; turns on the spot stay at 45 for accuracy.
 #define SPEED_SLOW_MM_S             75u
 #define SPEED_TURN_MM_S             45u
+// Slow start of line following (2026-11-24).  It used SPEED_SLOW_MM_S
+// (75), faster than following itself (55), so the robot rejoined the line
+// at an angle and faster than usual and the steering swung hard (wheels
+// 28 to 166 mm/s).  40 is the slowest the left wheel runs reliably
+// (FOLLOW_LEFT_MIN_MM_S).  The steering is limited to
+// FOLLOW_SLOW_STEER_PERCENT of the speed meanwhile (normally
+// STEER_LIMIT_PERCENT), for _LONG_MS after a bypass or line search and
+// _SHORT_MS after a junction turn, calibration or a clear scan.
+#define FOLLOW_SLOW_SPEED_MM_S      40u
+#define FOLLOW_SLOW_STEER_PERCENT   35u
+#define FOLLOW_SLOW_LONG_MS         1500u
+#define FOLLOW_SLOW_SHORT_MS        600u
 // 2026-11-17 (build 8): size of each on-the-spot turn, in percent of the
 // angle asked for.  The robot coasts on after the wheels reach their
 // distance, and on the track right turns came out too big, so the bypass
@@ -210,6 +222,12 @@
 // from the MOTOR_MIN_PERMILLE dead-band drive to zero and back, which is
 // what made the robot jerk at low speed.
 #define STEER_LIMIT_PERCENT         70u
+// 2026-11-24: the limit for left curves only.  The left wheel cannot go
+// below FOLLOW_LEFT_MIN_MM_S, so at 70 the tightest left curve was about
+// 12 cm radius and the robot ran off a sharp left bend.  At 100 the right
+// wheel may reach about 150 mm/s, about 10 cm radius.  The left wheel never
+// stops (its floor), so the reason for the 70 limit does not apply.
+#define STEER_LEFT_LIMIT_PERCENT    100u
 // Line following: the lowest speed each wheel is asked for.  Measured
 // 2026-11-17 at 75 mm/s: in left curves the left (inner) wheel was asked
 // for 22 mm/s, stuck near 0 to 30 and then surged past 100, which shook
@@ -255,6 +273,12 @@
 #define LINE_JUNCTION_MS            20u
 // Was 150: 500 lets the ramped left turn find the line before a sweep.
 #define LINE_LOST_MS                500u
+// 2026-11-24: a line lost again within LINE_RELOST_MS of following resuming
+// is not searched for at once: the robot keeps following (steering hard to
+// the side the line went) for up to LINE_RELOST_WAIT_MS more.  At a sharp
+// left bend it lost and found the line 6 times in 2 s, lurching each time.
+#define LINE_RELOST_MS              1000u
+#define LINE_RELOST_WAIT_MS         700u
 #define LINE_FOUND_MS               30u
 // Longest gap allowed between edges before a capture ends.  It must exceed
 // the widest element at the slowest reading speed: 400 ms lets a 17 mm bar
@@ -330,6 +354,9 @@
 // sign does not matter: the hump detector uses the combined tilt.
 #define IMU_SIDE_AXIS               1u
 #define IMU_CALIB_SAMPLES           50u
+// 2026-11-24: level is re-learnt from every still block of IMU_CALIB_SAMPLES
+// in READY (imu.c relevel()); still means the raw pitch spans at most this.
+#define IMU_RELEVEL_SPAN_MDEG       2000
 // Identical readings in a row (20 ms apart) that mean the accelerometer
 // has stopped updating and must be started again.
 #define IMU_FROZEN_SAMPLES          50u
@@ -345,14 +372,13 @@
 // 2026-11-11: briefly raised to 7 degrees for 150 ms against false humps
 // from the wobble, but that missed the 1.3 cm hump; the wobble is fixed
 // and on-the-spot turns and braking are filtered out in imu.c instead.
-#define HUMP_ENTER_MDEG             5000
+#define HUMP_ENTER_MDEG             3000
 #define HUMP_EXIT_MDEG              2000
 #define HUMP_HOLD_MS                100u
 // Line following must have lasted this long before hump samples count, so
 // the lean from pulling away and speeding up is not measured as a hump.
 #define HUMP_SETTLE_MS              1200u
-// 2026-11-17 (build 8): after a sharp turn while following, humps count
-// again only after this long without one.  A shaky turn let the turn rate
+// A shaky turn let the turn rate
 // dip below the limit for a moment, which let a turn's lean read as a hump.
 #define HUMP_AFTER_TURN_MS          500u
 // Lifted drive wheel to the pivot line through the other drive wheel and
@@ -371,8 +397,7 @@
 // have to be 41 mm high to reach it).  2026-11-17: an upward-push rule was
 // tried and dropped; it cannot tell a gentle lift from a wheel on the hump.
 #define LIFT_TILT_MDEG              25000
-// 2026-11-17 (build 8): "too big to be a hump".  In steady line following
-// (no turn, braking or pull-away, as for hump detection) the floor tilts
+// for hump detection, the floor tilts
 // the robot at most 7.7 degrees, so a lean of 15 (a 25 mm "hump") is
 // taken as a lift.  The 25-degree limit above applies everywhere else.
 #define LIFT_TILT_STEADY_MDEG       15000
@@ -384,7 +409,12 @@
 /* Buddy 5: obstacle tuning.                                               */
 /* ------------------------------------------------------------------------ */
 
-#define OBSTACLE_DETECT_MM          250u
+// 2026-11-24: 250 to 190, to stop about 15 cm from the obstacle.  The robot
+// stops about 4 cm after detecting (profiles read 17-23 cm at 250).  At
+// 140 (about 12 cm) the first scan failed every time: the flat face
+// reflected the sound away at the steep edge angles, the obstacle read
+// 2-3 cm wide, and the robot reversed and scanned again.
+#define OBSTACLE_DETECT_MM          190u
 #define OBSTACLE_RELEASE_MM         350u
 #define MONITOR_PERIOD_MS           60u
 #define SONAR_TIMEOUT_MS            40u
@@ -433,29 +463,42 @@
 // The course obstacle is at most 200 mm long along the line (given
 // 2026-11-16; was 150).  Its width is not known and comes from the scan.
 #define OBSTACLE_DEPTH_EST_MM       200u
-#define VEHICLE_LENGTH_MM           180u
+// 2026-11-24: 180 to 140; only used for the bypass pass leg (vehicle.c),
+// which is now 4 cm shorter.
+#define VEHICLE_LENGTH_MM           140u
 #define BYPASS_RETRIES_MAX          2u
 #define JUNCTION_ADVANCE_MM         60u
 // Bypass (2026-11-11): back away this far before turning out, so the turn
 // does not swing the robot into the obstacle, and step out at least this
 // far sideways from the line (more for a wide obstacle).
-#define BYPASS_BACKUP_MM            50u
+// 2026-11-24: 50 to 100; the robot now stops about 15 cm away.
+#define BYPASS_BACKUP_MM            100u
 #define BYPASS_LATERAL_MM           150u
 // 2026-11-17: the sideways distance worked out from the scanned width is
 // cut to this percentage (was 100).  The robot swung out too wide and met
 // a neighbouring line.  BYPASS_LATERAL_MM stays the least it will go.
 #define BYPASS_LATERAL_PERCENT      80u
+// 2026-11-24: added to the sideways distance after the percentage and the
+// minimum, so every bypass steps out 2 cm further.
+#define BYPASS_LATERAL_EXTRA_MM     20u
 // On the way back, a line only counts once this percentage of the expected
 // distance back has been covered.  Seen 2026-11-17: a neighbouring line
 // 19 cm into a 51 cm return leg was taken for the one that was left.
-#define BYPASS_REJOIN_GUARD_PERCENT 50u
+// 2026-11-24: 50 to 15.  On the small course platform the line was met
+// 5-6 cm into a 27 cm return leg (about 20 %) in every failed rejoin; it
+// was ignored, the robot went on to other black further out, and the
+// realign turn then missed the line.
+#define BYPASS_REJOIN_GUARD_PERCENT 15u
 // Bypass return (2026-11-16): the approach leg drives until the centre
 // sensor finds the line, giving up after BYPASS_APPROACH_MAX_MM.  The robot
 // then drives BYPASS_CENTRE_MM further, which is the distance from the
 // centre sensor back to the axle, so its turning centre sits on the line,
 // and turns back towards its old heading until the sensor meets the line
 // again, giving up after BYPASS_REALIGN_MAX_DEG.
-#define BYPASS_APPROACH_MAX_MM      700u
+// 2026-11-24: 700 to 400.  The way back is about 210-270 mm, and on the
+// small course platform a 70 cm miss drove far past the line before the
+// sweep started; giving up sooner sweeps for the line close to it.
+#define BYPASS_APPROACH_MAX_MM      400u
 #define BYPASS_CENTRE_MM            JUNCTION_ADVANCE_MM
 #define BYPASS_REALIGN_MAX_DEG      100
 

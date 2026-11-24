@@ -37,7 +37,8 @@ static int32_t volatile g_values[TUNE_COUNT] =
     (int32_t) REVERSE_DISTANCE_MM,      // Cast: unsigned constant, exact.
     (int32_t) TURN_RIGHT_PERCENT,       // Cast: unsigned constant, exact.
     (int32_t) TURN_LEFT_PERCENT,        // Cast: unsigned constant, exact.
-    (int32_t) OBS_BEAM_HALF_DEG         // Cast: unsigned constant, exact.
+    (int32_t) OBS_BEAM_HALF_DEG,        // Cast: unsigned constant, exact.
+    (int32_t) OBSTACLE_DETECT_MM        // Cast: unsigned constant, exact.
 };
 
 static tune_range_t const g_ranges[TUNE_COUNT] =
@@ -54,7 +55,8 @@ static tune_range_t const g_ranges[TUNE_COUNT] =
     { 0, 500 },         // TUNE_REVERSE_MM
     { 50, 150 },        // TUNE_TURN_RIGHT_PERCENT
     { 50, 150 },        // TUNE_TURN_LEFT_PERCENT
-    { 0, 20 }           // TUNE_OBS_BEAM_DEG
+    { 0, 20 },          // TUNE_OBS_BEAM_DEG
+    { 100, 300 }        // TUNE_OBS_DETECT_MM: below OBSTACLE_RELEASE_MM.
 };
 
 

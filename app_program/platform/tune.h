@@ -40,6 +40,7 @@ typedef enum
     TUNE_TURN_RIGHT_PERCENT,    // Right on-the-spot turn size, %.
     TUNE_TURN_LEFT_PERCENT,     // Left on-the-spot turn size, %.
     TUNE_OBS_BEAM_DEG,          // Sonar beam correction per edge, deg.
+    TUNE_OBS_DETECT_MM,         // Obstacle detection distance, mm.
     TUNE_COUNT
 } tune_param_t;
 

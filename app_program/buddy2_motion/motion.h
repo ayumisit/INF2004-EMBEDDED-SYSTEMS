@@ -75,6 +75,8 @@ bool     motion_move_backward(uint32_t distance_mm, uint32_t speed_mm_s);
 bool     motion_turn_left(uint32_t angle_deg);
 bool     motion_turn_right(uint32_t angle_deg);
 bool     motion_follow_line(uint32_t speed_mm_s);
+bool     motion_follow_line_gently(uint32_t speed_mm_s,
+                                   uint32_t steer_percent);
 bool     motion_stop(void);
 
 uint32_t motion_pack_command(motion_cmd_type_t type, uint32_t speed_mm_s,

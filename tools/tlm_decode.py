@@ -51,7 +51,7 @@ TUNE_COMMAND = 5
 TUNE_PARAMS = ['motor_max', 'speed_follow', 'speed_slow', 'speed_turn',
                'steer_kp', 'steer_kd', 'steer_dir', 'enc_um_per_edge',
                'track_mm', 'reverse_mm', 'turn_right_pct', 'turn_left_pct',
-               'obs_beam_deg']
+               'obs_beam_deg', 'obs_detect_mm']
 
 # (field name, width, kind) per status word, in sys_status_word_t order.
 # kind: 'u' unsigned, 's' excess-K signed, or a list of names.

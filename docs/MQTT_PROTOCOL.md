@@ -126,6 +126,7 @@ Changes are lost on reset: copy good values into `platform/robot_cfg.h`.
 | 10 | `turn_right_pct` | 50..150 % of the angle asked for | `TURN_RIGHT_PERCENT` |
 | 11 | `turn_left_pct` | 50..150 % of the angle asked for | `TURN_LEFT_PERCENT` |
 | 12 | `obs_beam_deg` | 0..20 deg (sonar beam correction of the width) | `OBS_BEAM_HALF_DEG` |
+| 13 | `obs_detect_mm` | 100..300 mm (obstacle detection distance; the robot stops about 40 mm closer) | `OBSTACLE_DETECT_MM` |
 
 ## Link recovery
 
